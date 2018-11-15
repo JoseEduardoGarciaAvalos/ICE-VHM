@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" type="text/css" href="estiloMenu.css">
+    </head>
+    <body>
+        <button class="accordion nivel1" onclick="irA('principal/index.html')">PRINCIPAL</button><div class="panel"></div>
+        <button class="accordion nivel1">HISTORIETAS</button><div class="panel">
+            <button class="accordion nivel2">NIÑOS</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=5')">Spam</button><div class="panel"></div>
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=3')">Troll</button><div class="panel"></div>
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=1')">Banneo</button><div class="panel"></div>
+            </div>
+            <button class="accordion nivel2">JÓVENES</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=6')">Spam</button>
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=4')">Troll</button>
+                <button class="accordion nivel3" onclick="irA('historietas/index.html?h=2')">Banneo</button>
+            </div>
+        </div>
+        <button class="accordion nivel1">MINIJUEGOS</button><div class="panel">
+            <button class="accordion nivel2" onclick="irA('minijuegos/index.html?m=2')">NIÑOS</button><div class="panel"></div>
+            <button class="accordion nivel2" onclick="irA('minijuegos/index.html?m=1')">JÓVENES</button><div class="panel"></div>
+        </div>
+        <button class="accordion nivel1">VIDEOS</button><div class="panel">
+            <button class="accordion nivel2">NIÑOS</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('videos/video1.html')">Introducción</button>
+                <button class="accordion nivel3" onclick="irA('videos/video2A.html')">Ciberbullying</button>
+                <button class="accordion nivel3" onclick="irA('videos/video3A.html')">Grooming</button>
+                <button class="accordion nivel3" onclick="irA('videos/video4A.html')">Happy Slapping</button>
+                <button class="accordion nivel3" onclick="irA('videos/video5A.html')">Ciberbaiting</button>
+                <button class="accordion nivel3" onclick="irA('videos/video6A.html')">Sexting</button>
+            </div>
+            <button class="accordion nivel2">JÓVENES</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('videos/video1.html')">Introducción</button>
+                <button class="accordion nivel3" onclick="irA('videos/video2B.html')">Ciberbullying</button>
+                <button class="accordion nivel3" onclick="irA('videos/video3B.html')">Grooming</button>
+                <button class="accordion nivel3" onclick="irA('videos/video4B.html')">Happy Slapping</button>
+                <button class="accordion nivel3" onclick="irA('videos/video5B.html')">Ciberbaiting</button>
+                <button class="accordion nivel3" onclick="irA('videos/video6B.html')">Sexting</button>
+            </div>
+        </div> 
+        <button class="accordion nivel1">TEST</button><div class="panel">
+            <button class="accordion nivel2">NIÑOS</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('test/index.html?t=1')">Conducta</button>
+                <button class="accordion nivel3" onclick="irA('test/index.html?t=2')">Protección</button>
+            </div>
+            <button class="accordion nivel2">JÓVENES</button><div class="panel">
+                <button class="accordion nivel3" onclick="irA('test/index.html?t=3')">Conducta</button>
+                <button class="accordion nivel3" onclick="irA('test/index.html?t=4')">Protección</button>
+            </div>
+        </div>
+        <button class="accordion nivel1">HERRAMIENTAS</button><div class="panel">
+            <button class="accordion nivel3" onclick="irA('herramientas/glosario.html')">Glosario</button>
+            <button class="accordion nivel3" onclick="irA('herramientas/ayuda.html')">Ayuda</button>
+            <button class="accordion nivel3" onclick="irA('herramientas/acerca.html')">Acerca de...</button>
+            <button class="accordion nivel3" onclick="irA('herramientas/directorio.html')">Directorio de denuncia</button>
+        </div>
+<script>
+    var acc = document.getElementsByClassName("nivel1");
+    var i;
+
+    for (i = 0; i < acc.length; i++) {
+        acc[i].addEventListener("click", function() {
+            this.classList.toggle("active");
+            var panel = this.nextElementSibling;
+            if (panel.style.display === "block") {
+            panel.style.display = "none";
+            } else {
+            panel.style.display = "block";
+            }
+        });
+    }
+    var acc = document.getElementsByClassName("nivel2");
+    var i;
+
+    for (i = 0; i < acc.length; i++) {
+        acc[i].addEventListener("click", function() {
+            this.classList.toggle("active");
+            var panel = this.nextElementSibling;
+            if (panel.style.display === "block") {
+            panel.style.display = "none";
+            } else {
+            panel.style.display = "block";
+            }
+        });
+    }
+    function irA(a){
+        parent.MyIframe.location.href=a;
+        parent.MyIframe.focus();
+    }    
+</script>
+    </body>
+</html>

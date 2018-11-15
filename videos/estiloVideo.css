@@ -1,0 +1,13 @@
+.video{
+    width: 70%;
+}
+.videoContenedor{
+    text-align: center;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+.videoGrande{
+    width: 100%;
+    height: 100%;
+}

@@ -1,0 +1,21 @@
+﻿,objetivo,tipo,encargado
+1,Protege,teclado,C
+2,Filtra,micro,E
+3,Apila 3 aliados,mouseA,E
+4,Que no haya cartas,mouseC,E
+5,Encuéntralos,teclado,C
+6,Que no resbale,micro,C
+7,Sigue la misma secuencia,mouseA,I
+8,Que no se salgan,mouseC,E
+9,Si o no,teclado,E
+10,Aviéntalos,micro,I
+11,Escoge al culpable,mouseA,I
+12,Rompe los bloques de hielo,mouseC,I
+13,Ayuda pero no te caigas,teclado,I
+14,Ni tan caliente ni frio,micro,C
+15,Maréalos,mouseA,E
+16,Toma la mejor decisión,mouseC,C
+17,No se moje,teclado,I
+18,Silencio,micro,E
+19,Buscalos,mouseA,C
+20,Cierra la publicidad,mouseC,C

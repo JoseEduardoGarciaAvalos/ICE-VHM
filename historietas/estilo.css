@@ -1,0 +1,41 @@
+#PRINCIPAL{
+    height: 100%;
+    display: flex;
+    overflow: auto;
+}
+.primero, .ultimo {
+    display: flex;
+    align-items: center; 
+}
+.CENTRO{
+    padding: 10px;
+    display: flex;
+    align-items: center;
+}
+.CENTRO > .corta {
+    width: 20em;
+}
+.CENTRO > .larga {
+    width: 40em;
+}
+.CENTRO > img {
+    width: 30em;
+    height: 100%;
+    border: 10px solid #22c922; 
+}
+.boton{
+    padding: 10%;
+    font-size: 16px;
+    margin: 4px 2px;
+    -webkit-transition-duration: 0.4s;
+    transition-duration: 0.4s;
+    cursor: pointer;
+    background-color: white; 
+    color: black; 
+    border: 2px solid #4CAF50;
+    width: 100px;
+}
+.boton:hover {
+    background-color: #4CAF50;
+    color: white;
+}

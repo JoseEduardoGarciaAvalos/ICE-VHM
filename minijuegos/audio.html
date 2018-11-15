@@ -1,0 +1,81 @@
+﻿<html >
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+        <link href="estilos.css" rel="Stylesheet" type="text/css">
+        <script type="text/javascript" src="eventos.js"></script>
+    </head>
+    <body >
+        <div class="c2_contenedor">
+            <table>
+                <tr>
+                    <td colspan="4">
+                        <div class="c2_titulo1"><b>Volumen</b></div>
+                        <hr class="c2_linea">
+                    </td> 
+                </tr>
+                <tr>
+
+                    <td>
+                        <b>Música: </b>
+                    </td>
+                    <td class="c2_contenedorDeslizador">
+                        <input type="range" min="-20"  max="0" value="-5" class="c2_deslizador" id="c2_dMusica" oninput="c2_deslizador('c2_dMusica');">
+                    </td>                  
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_dMusicaK"></div>
+                    </td> 
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_BOTON" onclick="c2_deslizadorSilenciar('c2_dMusica')">Silenciar</div>
+                    </td>                     
+                </tr>
+                <tr>
+                    <td>
+                        <b>Sonidos: </b>
+                    </td>
+                    <td class="c2_contenedorDeslizador">
+                        <input type="range" min="-20" max="0" value="0" class="c2_deslizador" id="c2_dSonido" oninput="c2_deslizador('c2_dSonido');">
+                    </td>                   
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_dSonidoK"></div>
+                    </td>
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_BOTON" onclick="c2_deslizadorSilenciar('c2_dSonido')">Silenciar</div>
+                    </td>                    
+                </tr>   
+                <tr class="c2_filaMicro">
+                    <td colspan="4">
+                        <div class="c2_titulo1"><b>Micrófono</b></div>
+                        <hr class="c2_linea">
+                    </td> 
+                </tr> 
+                <tr class="c2_filaMicro">
+                    <td>
+                        <b>Dispositivo: </b>
+                    </td>
+                    <td class="c2_contenedorLista">
+                        <select id="c2_iDispositivo" onchange="c2_cambioLista()">
+                            <option value="-1">Ninguno (Por medio de la tecla espacio)</option>
+                            <option value="0">Dispositivo X</option>
+                            <option value="2">Dispositivo Y</option>
+                            <option value="3">Dispositivo Z</option>
+                        </select>
+                    </td>                 
+                </tr>   
+                <tr class="c2_filaMicro c2_filaMicroE">
+                    <td>
+                        <b>Sensibilidad: </b>
+                    </td>
+                    <td class="c2_contenedorDeslizador">
+                        <input type="range" min="-20" max="0" value="-5" class="c2_deslizador" id="c2_dSensible" oninput="c2_deslizador('c2_dSensible');">
+                    </td>
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_dSensibleK"></div>
+                    </td>
+                    <td>
+                        <div class="c2_contenedorPorcentaje c2_BOTON" onclick="C2('c2_probar')">Probar</div>
+                    </td>            
+                </tr>                
+            </table>
+        </div>
+    </body>
+</html>

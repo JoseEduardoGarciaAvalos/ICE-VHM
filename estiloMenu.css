@@ -1,0 +1,39 @@
+    .accordion {
+        background-color: #eee;
+        color: #444;
+        cursor: pointer;
+        padding: 18px 6px;
+        width: 100%;
+        border: 1px solid #000;
+        text-align: left;
+        outline: none;
+        font-size: 22px;
+        transition: 0.4s;
+    }
+    .active, .accordion:hover {
+        background-color: #ccc; 
+    }
+    .nivel1 {
+        background-color: #FACC2E;
+    }    
+    .nivel1:hover {
+        background-color: #DBA901;
+    }  
+    .nivel2 {
+        background-color: #FE9A2E;
+    }    
+    .nivel2:hover {
+        background-color: #FF8000;
+    }    
+
+    .nivel3 {
+        background-color: #FE642E;
+    }    
+    .nivel3:hover {
+        background-color: #DF3A01;
+    } 
+    .panel {
+        display: none;
+        overflow: hidden;
+        margin-left: 10px;
+    }
