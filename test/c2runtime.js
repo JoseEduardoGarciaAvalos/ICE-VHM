@@ -25233,18 +25233,18 @@ window["chartjs"] = function(context){
 cr.getObjectRefTable = function () { return [
 	cr.plugins_.AJAX,
 	cr.plugins_.Arr,
-	cr.plugins_.Dictionary,
 	cr.plugins_.c2canvas,
 	cr.plugins_.Browser,
+	cr.plugins_.Dictionary,
 	cr.plugins_.Function,
 	cr.plugins_.Mouse,
 	cr.plugins_.Rex_CSV,
 	cr.plugins_.Rex_Hash,
 	cr.plugins_.rex_TagText,
 	cr.plugins_.Rex_PatternGen,
+	cr.plugins_.Sprite,
 	cr.plugins_.TiledBg,
 	cr.plugins_.HTML_iFrame,
-	cr.plugins_.Sprite,
 	cr.behaviors.Rex_canvas_chart_pie,
 	cr.system_object.prototype.cnds.OnLayoutStart,
 	cr.plugins_.rex_TagText.prototype.cnds.CompareInstanceVar,
@@ -25308,4 +25308,3 @@ cr.getObjectRefTable = function () { return [
 	cr.behaviors.Rex_canvas_chart_pie.prototype.acts.AddData,
 	cr.system_object.prototype.exps.random
 ];};
-
