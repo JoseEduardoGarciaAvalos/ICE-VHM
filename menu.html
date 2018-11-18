@@ -6,7 +6,7 @@
         <link rel="stylesheet" type="text/css" href="estiloMenu.css">
     </head>
     <body>
-        <button class="accordion nivel1" onclick="irA('principal/index.html')">PRINCIPAL</button><div class="panel"></div>
+        <button class="accordion nivel1" onclick="irA('principal/index.html?p=0')">PRINCIPAL</button><div class="panel"></div>
         <button class="accordion nivel1">HISTORIETAS</button><div class="panel">
             <button class="accordion nivel2">NIÑOS</button><div class="panel">
                 <button class="accordion nivel3" onclick="irA('historietas/index.html?h=5')">Spam</button><div class="panel"></div>
@@ -52,10 +52,10 @@
             </div>
         </div>
         <button class="accordion nivel1">HERRAMIENTAS</button><div class="panel">
-            <button class="accordion nivel3" onclick="irA('herramientas/glosario.html')">Glosario</button>
-            <button class="accordion nivel3" onclick="irA('herramientas/ayuda.html')">Ayuda</button>
-            <button class="accordion nivel3" onclick="irA('herramientas/acerca.html')">Acerca de...</button>
-            <button class="accordion nivel3" onclick="irA('herramientas/directorio.html')">Directorio de denuncia</button>
+            <button class="accordion nivel3" onclick="irA('principal/index.html?p=1')">Glosario</button>
+            <button class="accordion nivel3" onclick="irA('principal/index.html?p=2')">Ayuda</button>
+            <button class="accordion nivel3" onclick="irA('principal/index.html?p=3')">Acerca de...</button>
+            <button class="accordion nivel3" onclick="irA('principal/index.html?p=4')">Directorio de denuncia</button>
         </div>
 <script>
     var acc = document.getElementsByClassName("nivel1");
