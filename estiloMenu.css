@@ -4,11 +4,20 @@
         cursor: pointer;
         padding: 18px 6px;
         width: 100%;
-        border: 1px solid #000;
-        text-align: left;
+        
         outline: none;
         font-size: 22px;
         transition: 0.4s;
+        
+/*        border: 1px solid #000;
+        text-align: left;*/
+        
+        border-radius: 200px;
+        -moz-border-radius: 200px;
+        -webkit-border-radius: 200px;
+        border: 0px solid #000000;   
+        margin: 2px;
+        text-align: center;
     }
     .active, .accordion:hover {
         background-color: #ccc; 
@@ -34,6 +43,7 @@
     } 
     .panel {
         display: none;
-        overflow: hidden;
-        margin-left: 10px;
+/*        overflow: hidden;*/
+        margin-left: 8px;
+        margin-right: 8px;
     }
