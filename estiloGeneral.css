@@ -1,33 +1,23 @@
-/*Resolucion recomendada 1024 x 768 */
+/*Resolucion recomendada 1024 x 768, minima es ancho=255*/
 html,body{
     margin:0px;
-    height:100%;
-    width: 100%;
-    overflow:hidden
+    background: black;
 }
 
 .menu {
-    float: left;
-    height: 100.1%;
-    width: 21.5%;
     background: #B18904;
 }
 
 .contenido {
-    float: left;
-    height: 100%;
-    width: 78.5%;
     background-image: url(muro%20de%20ladrillos.png);
 }
 
 .modulo{
     position: relative;
-        top: -30px;
 }
 
 .minerva{
     position: relative;
-    bottom:50px;
     color: #ffffff;
     text-align: right;
     height: 50px;
@@ -37,19 +27,112 @@ html,body{
 .derecho{
     position: relative;
     bottom:35px;
-    right: 45px;
 }
 
-/*
-
-@media only screen and (min-width: 1300px) and (max-height: 800px){
-    .modulo {
-        bottom: 10px;
+@media (min-width: 255px) and (max-width: 300px){
+    .menu, .minerva {
+        top: -185px;
+    }
+    .modulo{
+        top: -87px;
     }
 }
 
-@media only screen and (min-width: 1900px) and (max-height: 1080px) {
-    .modulo {
-        bottom: 25px;
+@media (min-width: 301px) and (max-width: 350px){
+    .menu, .minerva {
+        top: -145px;
+    }
+    .modulo{
+        top: -70px;
+    }
+}
+
+@media (min-width: 351px) and (max-width: 400px){
+    .menu, .minerva {
+        top: -115px;
+    }
+    .modulo{
+        top: -55px;
+    }
+}
+
+@media (min-width: 401px) and (max-width: 450px){
+    .menu, .minerva {
+        top: -80px;
+    }
+    .modulo{
+        top: -37px;
+    }
+}
+
+@media (min-width: 451px) and (max-width: 500px){
+    .menu, .minerva {
+        top: -40px;
+    }
+    .modulo{
+        top: -18px;
+    }
+}
+
+@media (max-width: 500px){
+    html,body{
+        width: 100%;
+    }
+    .menu {
+        height: 400px;
+        width: 100%;
+        position: relative;
+        display: block;
+    }
+    .minerva{
+        display: block;
+    }
+    .contenido {
+        height: 400px;
+        width: 100%;
+    }
+    .modulo{
+        height: 400px;
+    }
+    .mArriba{
+        display: none;
+    }
+    .derecho{
+        width: 80%;
+    }
+}
+
+@media (min-width: 501px) {
+    html,body{
+        width: 1024px;
+        height: 658px;
     }     
-}*/
+    .menu {
+        float: left;
+        height: 100.1%;
+        width: 220px;
+    }
+    .contenido {
+        float: left;
+        height: 100%;
+        width: 804px;
+    }
+    .modulo{
+        top: -30px;
+    }
+    .minerva{
+        bottom:50px;
+    }
+    .mAbajo{
+        display: none;
+    }
+    .derecho{
+        right: 45px;
+    }
+}
+
+@media (min-width: 1024px) {
+    html,body{
+        overflow:hidden
+    }  
+}

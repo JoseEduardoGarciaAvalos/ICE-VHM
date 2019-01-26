@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html manifest="offline.appcache">
 <head>
     <meta charset="UTF-8" />
@@ -29,10 +29,12 @@
 			background: #000;
 			color: #fff;
 			overflow: hidden;
+/*
 			touch-action: none;
 			-ms-touch-action: none;
+*/
 		}
-		canvas {
+		.c2_Bloqueo {
 			touch-action-delay: none;
 			touch-action: none;
 			-ms-touch-action: none;
@@ -79,6 +81,7 @@
 	<!-- Construct 2 exported games require jQuery. -->
 	<script src="jquery-2.1.1.min.js"></script>
 
+	<script src="firebase.js"></script>
 	<script src="mazegen.js"></script>
 	<script src="adapter.js"></script>
 	<script src="zlib_and_gzip.min.js"></script>

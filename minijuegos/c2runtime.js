@@ -16269,9 +16269,86 @@ cr.plugins_.Audio = function(runtime)
 	var rolloffFactor = 1;
 	var micSource = null;
 	var micTag = "";
-	var isMusicWorkaround = false;
-	var musicPlayNextTouch = [];
+	var useNextTouchWorkaround = false;			// heuristic in case play() does not return a promise and we have to guess if the play was blocked
+	var playOnNextInput = [];					// C2AudioInstances with HTMLAudioElements to play on next input event
 	var playMusicAsSoundWorkaround = false;		// play music tracks with Web Audio API
+	var hasPlayedDummyBuffer = false;			// dummy buffer played to unblock AudioContext on some platforms
+	function addAudioToPlayOnNextInput(a)
+	{
+		var i = playOnNextInput.indexOf(a);
+		if (i === -1)
+			playOnNextInput.push(a);
+	};
+	function tryPlayAudioElement(a)
+	{
+		var audioElem = a.instanceObject;
+		var playRet;
+		try {
+			playRet = audioElem.play();
+		}
+		catch (err) {
+			addAudioToPlayOnNextInput(a);
+			return;
+		}
+		if (playRet)		// promise was returned
+		{
+			playRet.catch(function (err)
+			{
+				addAudioToPlayOnNextInput(a);
+			});
+		}
+		else if (useNextTouchWorkaround && !audRuntime.isInUserInputEvent)
+		{
+			addAudioToPlayOnNextInput(a);
+		}
+	};
+	function playQueuedAudio()
+	{
+		var i, len, m, playRet;
+		if (!hasPlayedDummyBuffer && !isContextSuspended && context)
+		{
+			playDummyBuffer();
+			if (context["state"] === "running")
+				hasPlayedDummyBuffer = true;
+		}
+		var tryPlay = playOnNextInput.slice(0);
+		cr.clearArray(playOnNextInput);
+		if (!silent)
+		{
+			for (i = 0, len = tryPlay.length; i < len; ++i)
+			{
+				m = tryPlay[i];
+				if (!m.stopped && !m.is_paused)
+				{
+					playRet = m.instanceObject.play();
+					if (playRet)
+					{
+						playRet.catch(function (err)
+						{
+							addAudioToPlayOnNextInput(m);
+						});
+					}
+				}
+			}
+		}
+	};
+	function playDummyBuffer()
+	{
+		if (context["state"] === "suspended" && context["resume"])
+			context["resume"]();
+		if (!context["createBuffer"])
+			return;
+		var buffer = context["createBuffer"](1, 220, 22050);
+		var source = context["createBufferSource"]();
+		source["buffer"] = buffer;
+		source["connect"](context["destination"]);
+		startSource(source);
+	};
+	document.addEventListener("pointerup", playQueuedAudio, true);
+	document.addEventListener("touchend", playQueuedAudio, true);
+	document.addEventListener("click", playQueuedAudio, true);
+	document.addEventListener("keydown", playQueuedAudio, true);
+	document.addEventListener("gamepadconnected", playQueuedAudio, true);
 	function dbToLinear(x)
 	{
 		var v = dbToLinear_nocap(x);
@@ -17026,8 +17103,6 @@ cr.plugins_.Audio = function(runtime)
 	ObjectTracker.prototype.tick = function (dt)
 	{
 	};
-	var iOShadtouchstart = false;	// has had touch start input on iOS <=8 to work around web audio API muting
-	var iOShadtouchend = false;		// has had touch end input on iOS 9+ to work around web audio API muting
 	function C2AudioBuffer(src_, is_music)
 	{
 		this.src = src_;
@@ -17063,7 +17138,7 @@ cr.plugins_.Audio = function(runtime)
 				this.supportWebAudioAPI = true;		// can be routed through web audio api
 				this.bufferObject.addEventListener("canplay", function ()
 				{
-					if (!self.mediaSourceNode)		// protect against this event firing twice
+					if (!self.mediaSourceNode && self.bufferObject)
 					{
 						self.mediaSourceNode = context["createMediaElementSource"](self.bufferObject);
 						self.mediaSourceNode["connect"](self.outNode);
@@ -17122,6 +17197,16 @@ cr.plugins_.Audio = function(runtime)
 				++j;		// keep
 		}
 		audioInstances.length = j;
+		if (this.mediaSourceNode)
+		{
+			this.mediaSourceNode["disconnect"]();
+			this.mediaSourceNode = null;
+		}
+		if (this.outNode)
+		{
+			this.outNode["disconnect"]();
+			this.outNode = null;
+		}
 		this.bufferObject = null;
 		this.audioData = null;
 	};
@@ -17505,18 +17590,7 @@ cr.plugins_.Audio = function(runtime)
 ;
 				}
 			}
-			if (this.is_music && isMusicWorkaround && !audRuntime.isInUserInputEvent)
-				musicPlayNextTouch.push(this);
-			else
-			{
-				try {
-					this.instanceObject.play();
-				}
-				catch (e) {		// sometimes throws on WP8.1... try not to kill the app
-					if (console && console.log)
-						console.log("[C2] WARNING: exception trying to play audio '" + this.buffer.src + "': ", e);
-				}
-			}
+			tryPlayAudioElement(this);
 			break;
 		case API_WEBAUDIO:
 			this.muted = false;
@@ -17556,10 +17630,7 @@ cr.plugins_.Audio = function(runtime)
 ;
 					}
 				}
-				if (this.is_music && isMusicWorkaround && !audRuntime.isInUserInputEvent)
-					musicPlayNextTouch.push(this);
-				else
-					instobj.play();
+				tryPlayAudioElement(this);
 			}
 			break;
 		case API_CORDOVA:
@@ -17648,7 +17719,7 @@ cr.plugins_.Audio = function(runtime)
 			return;
 		switch (this.myapi) {
 		case API_HTML5:
-			this.instanceObject.play();
+			tryPlayAudioElement(this);
 			break;
 		case API_WEBAUDIO:
 			if (this.buffer.myapi === API_WEBAUDIO)
@@ -17666,7 +17737,7 @@ cr.plugins_.Audio = function(runtime)
 			}
 			else
 			{
-				this.instanceObject.play();
+				tryPlayAudioElement(this);
 			}
 			break;
 		case API_CORDOVA:
@@ -18024,7 +18095,7 @@ cr.plugins_.Audio = function(runtime)
 			playMusicAsSoundWorkaround = true;
 		if ((this.runtime.isiOS || (this.runtime.isAndroid && (this.runtime.isChrome || this.runtime.isAndroidStockBrowser))) && !this.runtime.isCrosswalk && !this.runtime.isDomFree && !this.runtime.isAmazonWebApp && !playMusicAsSoundWorkaround)
 		{
-			isMusicWorkaround = true;
+			useNextTouchWorkaround = true;
 		}
 		context = null;
 		if (typeof AudioContext !== "undefined")
@@ -18045,57 +18116,6 @@ cr.plugins_.Audio = function(runtime)
 				context = new AudioContext();
 			else if (typeof webkitAudioContext !== "undefined")
 				context = new webkitAudioContext();
-		}
-		var isAndroid = this.runtime.isAndroid;
-		var playDummyBuffer = function ()
-		{
-			if (isContextSuspended || !context["createBuffer"])
-				return;
-			var buffer = context["createBuffer"](1, 220, 22050);
-			var source = context["createBufferSource"]();
-			source["buffer"] = buffer;
-			source["connect"](context["destination"]);
-			startSource(source);
-		};
-		if (isMusicWorkaround)
-		{
-			var playQueuedMusic = function ()
-			{
-				var i, len, m;
-				if (isMusicWorkaround)
-				{
-					if (!silent)
-					{
-						for (i = 0, len = musicPlayNextTouch.length; i < len; ++i)
-						{
-							m = musicPlayNextTouch[i];
-							if (!m.stopped && !m.is_paused)
-								m.instanceObject.play();
-						}
-					}
-					cr.clearArray(musicPlayNextTouch);
-				}
-			};
-			document.addEventListener("touchend", function ()
-			{
-				if (!iOShadtouchend && context)
-				{
-					playDummyBuffer();
-					iOShadtouchend = true;
-				}
-				playQueuedMusic();
-			}, true);
-		}
-		else if (playMusicAsSoundWorkaround)
-		{
-			document.addEventListener("touchend", function ()
-			{
-				if (!iOShadtouchend && context)
-				{
-					playDummyBuffer();
-					iOShadtouchend = true;
-				}
-			}, true);
 		}
 		if (api !== API_WEBAUDIO)
 		{
@@ -18124,7 +18144,8 @@ cr.plugins_.Audio = function(runtime)
 			else
 			{
 				try {
-					useOgg = !!(new Audio().canPlayType('audio/ogg; codecs="vorbis"'));
+					useOgg = !!(new Audio().canPlayType('audio/ogg; codecs="vorbis"')) &&
+								!this.runtime.isWindows10;
 				}
 				catch (e)
 				{
@@ -18147,7 +18168,7 @@ cr.plugins_.Audio = function(runtime)
 			default:
 ;
 			}
-			this.runtime.tickMe(this);
+		this.runtime.tickMe(this);
 		}
 	};
 	var instanceProto = pluginProto.Instance.prototype;
@@ -22824,6 +22845,324 @@ cr.plugins_.Particles = function(runtime)
 }());
 ;
 ;
+cr.plugins_.Rex_ArrowKey = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Rex_ArrowKey.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+        this._directions = this.properties[0];
+        this._sensitivity = this.properties[1];
+	    this._reset_origin = (this.properties[2] == 1);
+        var touched_layer = this.properties[3];
+        this.runtime.tickMe(this);
+        this.touchwrap = null;
+        this.GetX = null;
+        this.GetY = null;
+        this.touch_src = null;
+        this.touched_layer = (isNaN(touched_layer))? touched_layer: parseInt(touched_layer);
+		this.origin_x = 0;
+		this.origin_y = 0;
+		this.curr_x = 0;
+		this.curr_y = 0;
+        this.is_on_dragging = false;
+        this.cmd_cancel = false;
+        this.keyMap = [false, false, false, false];
+        this.pre_key_id = 0;
+        this.diff_x = 0;
+        this.diff_y = 0;
+        this.press_handlers =   [cr.plugins_.Rex_ArrowKey.prototype.cnds.OnRIGHTPressed,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDOWNPressed,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnLEFTPressed,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnUPPressed     ];
+        this.release_handlers = [cr.plugins_.Rex_ArrowKey.prototype.cnds.OnRIGHTReleased,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDOWNReleased,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnLEFTReleased,
+                                 cr.plugins_.Rex_ArrowKey.prototype.cnds.OnUPReleased    ];
+	};
+	instanceProto.TouchWrapGet = function ()
+	{
+        if (this.touchwrap != null)
+            return this.touchwrap;
+;
+        var plugins = this.runtime.types
+        var name, inst;
+        for (name in plugins)
+        {
+            inst = plugins[name].instances[0];
+            if (inst instanceof cr.plugins_.rex_TouchWrap.prototype.Instance)
+            {
+                this.touchwrap = inst;
+                this.GetX = cr.plugins_.rex_TouchWrap.prototype.exps.XForID;
+                this.GetY = cr.plugins_.rex_TouchWrap.prototype.exps.YForID;
+                this.touchwrap.HookMe(this);
+                return this.touchwrap;
+            }
+        }
+;
+	};
+    instanceProto.OnTouchStart = function (touch_src, touchX, touchY)
+    {
+        if (this.cmd_cancel)
+        {
+            this.cmd_cancel = false;
+            return;
+        }
+        this.is_on_dragging = true;
+        this.touch_src = touch_src;
+        this.origin_x = this.get_touch_x();
+        this.origin_y = this.get_touch_y();
+        this.runtime.trigger(cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDetectingStart, this);
+    };
+    instanceProto.OnTouchEnd = function (touch_src)
+    {
+        if (touch_src != this.touch_src)
+            return;
+        this.touch_src = null;
+        this.is_on_dragging = false;
+        this._keydown(0);
+        this.runtime.trigger(cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDetectingEnd, this);
+    };
+	instanceProto.get_touch_x = function ()
+	{
+	    if (this.touch_src === null)
+	        return 0;
+        var touch_obj = this.TouchWrapGet();
+        this.GetX.call(touch_obj,
+            touch_obj.fake_ret, this.touch_src, this.touched_layer);
+        return touch_obj.fake_ret.value;
+	};
+	instanceProto.get_touch_y = function ()
+	{
+	    if (this.touch_src === null)
+	        return 0;
+        var touch_obj = this.TouchWrapGet();
+        this.GetY.call(touch_obj,
+            touch_obj.fake_ret, this.touch_src, this.touched_layer);
+        return touch_obj.fake_ret.value;
+	};
+    var RIGHTKEY = 0x1;
+    var DOWNKEY = 0x2;
+    var LEFTKEY = 0x4;
+    var UPKEY = 0x8;
+	instanceProto.tick = function ()
+	{
+	    this.cmd_cancel = false;
+        var touch_obj = this.TouchWrapGet();
+        if ((touch_obj == null) || (!this.is_on_dragging))
+            return;
+		this.curr_x = this.get_touch_x();
+		this.curr_y = this.get_touch_y();
+        var dx = this.curr_x - this.origin_x;
+        var dy = this.curr_y - this.origin_y;
+        this.diff_x = dx;
+        this.diff_y = dy;
+        var dist_o2c = Math.sqrt(dx*dx + dy*dy);
+        if ( dist_o2c >= this._sensitivity )
+        {
+            var angle = cr.to_clamped_degrees(Math.atan2(dy,dx));
+            switch (this._directions)
+            {
+            case 0:
+                var key_id = (angle <180)? DOWNKEY:UPKEY;
+                this._keydown(key_id);
+                break;
+            case 1:
+                var key_id = ((angle >90) && (angle <=270))? LEFTKEY:RIGHTKEY;
+                this._keydown(key_id);
+                break;
+            case 2:
+                var key_id = ((angle>45) && (angle<=135))?  DOWNKEY:
+                             ((angle>135) && (angle<=225))? LEFTKEY:
+                             ((angle>225) && (angle<=315))? UPKEY:RIGHTKEY;
+                this._keydown(key_id);
+                break;
+            case 3:
+                var key_id = ((angle>22.5) && (angle<=67.5))?   (DOWNKEY | RIGHTKEY):
+                             ((angle>67.5) && (angle<=112.5))?  DOWNKEY:
+                             ((angle>112.5) && (angle<=157.5))? (DOWNKEY | LEFTKEY):
+                             ((angle>157.5) && (angle<=202.5))? LEFTKEY:
+                             ((angle>202.5) && (angle<=247.5))? (LEFTKEY | UPKEY):
+                             ((angle>247.5) && (angle<=292.5))? UPKEY:
+                             ((angle>292.5) && (angle<=337.5))? (UPKEY | RIGHTKEY): RIGHTKEY;
+                this._keydown(key_id);
+                break;
+            }
+            if (this._reset_origin)
+            {
+                this.origin_x = this.curr_x;
+                this.origin_y = this.curr_y;
+            }
+        }
+        else
+        {
+            if (!this._reset_origin)
+            {
+                this._keydown(0);
+            }
+        }
+	};
+    var _keyid_list = [RIGHTKEY,DOWNKEY,LEFTKEY,UPKEY];
+    instanceProto._keydown = function(key_id)
+    {
+        if (this.pre_key_id == key_id)
+            return;
+        var i;
+        for (i=0; i<4; i++)
+        {
+            var is_key_down = ((_keyid_list[i] & key_id) != 0);
+            if (this.keyMap[i] && (!is_key_down))
+                this.runtime.trigger(this.release_handlers[i], this);
+        }
+        var pressed_any_key = false;
+        for (i=0; i<4; i++)
+        {
+            var is_key_down = ((_keyid_list[i] & key_id) != 0);
+            if ((!this.keyMap[i]) && is_key_down)
+            {
+                this.runtime.trigger(this.press_handlers[i], this);
+                pressed_any_key = true;
+            }
+            this.keyMap[i] = is_key_down;
+        }
+        if (pressed_any_key)
+            this.runtime.trigger(cr.plugins_.Rex_ArrowKey.prototype.cnds.OnAnyKey, this);
+        this.pre_key_id = key_id;
+    };
+	function Cnds() {};
+	pluginProto.cnds = new Cnds();
+	Cnds.prototype.IsUPDown = function()
+	{
+        return this.keyMap[3];
+	};
+	Cnds.prototype.IsDOWNDown = function()
+	{
+        return this.keyMap[1];
+	};
+	Cnds.prototype.IsLEFTDown = function()
+	{
+        return this.keyMap[2];
+	};
+	Cnds.prototype.IsRIGHTDown = function()
+	{
+        return this.keyMap[0];
+	};
+	Cnds.prototype.IsAnyDown = function()
+	{
+        return this.keyMap[3] | this.keyMap[2] | this.keyMap[1] | this.keyMap[0];
+	};
+	Cnds.prototype.OnUPPressed = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnDOWNPressed = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnLEFTPressed = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnRIGHTPressed = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnAnyPressed = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnUPReleased = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnDOWNReleased = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnLEFTReleased = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnRIGHTReleased = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnDetectingStart = function()
+	{
+        return true;
+	};
+	Cnds.prototype.OnDetectingEnd = function()
+	{
+        return true;
+	};
+	Cnds.prototype.IsInDetecting = function()
+	{
+        return this.is_on_dragging;
+	};
+	function Acts() {};
+	pluginProto.acts = new Acts();
+	Acts.prototype.Cancel = function ()
+	{
+	    var is_on_dragging = this.is_on_dragging;
+	    this.touch_src = null;
+	    this.is_on_dragging = false;
+        this.cmd_cancel = true;
+        if (is_on_dragging)
+            this.runtime.trigger(cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDetectingEnd, this);
+	};
+	Acts.prototype.SetTouchedLayer = function (layer)
+	{
+        if (!layer)
+            return;
+        this.touched_layer = layer.index;
+	};
+	function Exps() {};
+	pluginProto.exps = new Exps();
+	Exps.prototype.OX = function (ret)
+	{
+		ret.set_float(this.origin_x);
+	};
+	Exps.prototype.OY = function (ret)
+	{
+		ret.set_float(this.origin_y);
+	};
+	Exps.prototype.DistX = function (ret)
+	{
+		ret.set_float(this.diff_x);
+	};
+	Exps.prototype.DistY = function (ret)
+	{
+		ret.set_float(this.diff_y);
+	};
+	Exps.prototype.CurrX = function (ret)
+	{
+		ret.set_float(this.curr_x);
+	};
+	Exps.prototype.CurrY = function (ret)
+	{
+		ret.set_float(this.curr_y);
+	};
+}());
+;
+;
 cr.plugins_.Rex_CSV = function(runtime)
 {
 	this.runtime = runtime;
@@ -23955,6 +24294,1769 @@ cr.plugins_.Rex_EventBalancer = function(runtime)
 	Exps.prototype.ElapsedTicks = function (ret)
 	{
         ret.set_int(this.elapsed_ticks);
+	};
+}());
+;
+;
+window["Firebase"] = window["firebase"];
+window["FirebaseV3x"] = true;
+cr.plugins_.Rex_FirebaseAPIV3 = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Rex_FirebaseAPIV3.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+        window["Firebase"]["database"]["enableLogging"](this.properties[4] === 1);
+        if (this.properties[0] !== "")
+        {
+            this.initializeApp(this.properties[0], this.properties[1], this.properties[2], this.properties[3]);
+        }
+	};
+	instanceProto.onDestroy = function ()
+	{
+	};
+	instanceProto.initializeApp = function (apiKey, authDomain, databaseURL, storageBucket)
+	{
+        var config = {
+            "apiKey": apiKey,
+            "authDomain": authDomain,
+            "databaseURL": databaseURL,
+            "storageBucket": storageBucket,
+        };
+        window["Firebase"]["initializeApp"](config);
+        runAfterInitializeHandlers();
+	};
+	var isFirebase3x = function()
+	{
+        return (window["FirebaseV3x"] === true);
+    };
+    var isFullPath = function (p)
+    {
+        return (p.substring(0,8) === "https://");
+    };
+	var get_ref = function(path)
+	{
+        if (!isFirebase3x())
+        {
+            return new window["Firebase"](path);
+        }
+        else
+        {
+            var fnName = (isFullPath(path))? "refFromURL":"ref";
+            return window["Firebase"]["database"]()[fnName](path);
+        }
+	};
+	instanceProto.get_ref = function(k)
+	{
+        if (k == null)
+	        k = "";
+	    var path;
+	    if (isFullPath(k))
+	        path = k;
+	    else
+	        path = this.rootpath + k + "/";
+        return get_ref(path);
+	};
+    var get_key = function (obj)
+    {
+        return (!isFirebase3x())?  obj["key"]() : obj["key"];
+    };
+    var get_refPath = function (obj)
+    {
+        return (!isFirebase3x())?  obj["ref"]() : obj["ref"];
+    };
+    var get_root = function (obj)
+    {
+        return (!isFirebase3x())?  obj["root"]() : obj["root"];
+    };
+    var serverTimeStamp = function ()
+    {
+        if (!isFirebase3x())
+            return window["Firebase"]["ServerValue"]["TIMESTAMP"];
+        else
+            return window["Firebase"]["database"]["ServerValue"];
+    };
+    var get_timestamp = function (obj)
+    {
+        return (!isFirebase3x())?  obj : obj["TIMESTAMP"];
+    };
+	function Cnds() {};
+	pluginProto.cnds = new Cnds();
+	function Acts() {};
+	pluginProto.acts = new Acts();
+	Acts.prototype.initializeApp = function (apiKey, authDomain, databaseURL, storageBucket)
+	{
+        this.initializeApp(apiKey, authDomain, databaseURL, storageBucket);
+	};
+	function Exps() {};
+	pluginProto.exps = new Exps();
+    var __afterInitialHandler = [];
+    var addAfterInitialHandler = function(callback)
+    {
+        if (__afterInitialHandler === null)
+            callback()
+        else
+            __afterInitialHandler.push(callback);
+    };
+    var runAfterInitializeHandlers = function()
+    {
+        var i, cnt=__afterInitialHandler.length;
+        for(i=0; i<cnt; i++)
+        {
+            __afterInitialHandler[i]();
+        }
+        __afterInitialHandler = null;
+    };
+	window.FirebaseAddAfterInitializeHandler = addAfterInitialHandler;
+    var ItemListKlass = function ()
+    {
+        this.updateMode = 1;                  // AUTOCHILDUPDATE
+        this.keyItemID = "__itemID__";
+        this.snapshot2Item = null;
+        this.onItemAdd = null;
+        this.onItemRemove = null;
+        this.onItemChange = null;
+        this.onItemsFetch = null;
+        this.onGetIterItem = null;
+        this.extra = {};
+        this.query = null;
+        this.items = [];
+        this.itemID2Index = {};
+        this.add_child_handler = null;
+        this.remove_child_handler = null;
+        this.change_child_handler = null;
+        this.items_fetch_handler = null;
+    };
+    var ItemListKlassProto = ItemListKlass.prototype;
+    ItemListKlassProto.MANUALUPDATE = 0;
+    ItemListKlassProto.AUTOCHILDUPDATE = 1;
+    ItemListKlassProto.AUTOALLUPDATE = 2;
+    ItemListKlassProto.GetItems = function ()
+    {
+        return this.items;
+    };
+    ItemListKlassProto.GetItemIndexByID = function (itemID)
+    {
+        return this.itemID2Index[itemID];
+    };
+    ItemListKlassProto.GetItemByID = function (itemID)
+    {
+        var i = this.GetItemIndexByID(itemID);
+        if (i == null)
+            return null;
+        return this.items[i];
+    };
+    ItemListKlassProto.Clean = function ()
+    {
+        this.items.length = 0;
+        clean_table(this.itemID2Index);
+    };
+    ItemListKlassProto.StartUpdate = function (query)
+    {
+        this.StopUpdate();
+        this.Clean();
+        if (this.updateMode === this.MANUALUPDATE)
+            this.manual_update(query);
+        else if (this.updateMode === this.AUTOCHILDUPDATE)
+            this.auto_child_update_start(query);
+        else if (this.updateMode === this.AUTOALLUPDATE)
+            this.auto_all_update_start(query);
+    };
+    ItemListKlassProto.StopUpdate = function ()
+	{
+        if (this.updateMode === this.AUTOCHILDUPDATE)
+            this.auto_child_update_stop();
+        else if (this.updateMode === this.AUTOALLUPDATE)
+            this.auto_all_update_stop();
+	};
+	ItemListKlassProto.ForEachItem = function (runtime, start, end)
+	{
+	    if ((start == null) || (start < 0))
+	        start = 0;
+	    if ((end == null) || (end > this.items.length - 1))
+	        end = this.items.length - 1;
+        var current_frame = runtime.getCurrentEventStack();
+        var current_event = current_frame.current_event;
+		var solModifierAfterCnds = current_frame.isModifierAfterCnds();
+		var i;
+		for(i=start; i<=end; i++)
+		{
+            if (solModifierAfterCnds)
+            {
+                runtime.pushCopySol(current_event.solModifiers);
+            }
+            if (this.onGetIterItem)
+                this.onGetIterItem(this.items[i], i);
+            current_event.retrigger();
+		    if (solModifierAfterCnds)
+		    {
+		        runtime.popSol(current_event.solModifiers);
+		    }
+		}
+		return false;
+	};
+    ItemListKlassProto.add_item = function(snapshot, prevName, force_push)
+	{
+	    var item;
+	    if (this.snapshot2Item)
+	        item = this.snapshot2Item(snapshot);
+	    else
+	    {
+	        var k = get_key(snapshot);
+	        item = snapshot["val"]();
+	        item[this.keyItemID] = k;
+	    }
+        if (force_push === true)
+        {
+            this.items.push(item);
+            return;
+        }
+	    if (prevName == null)
+	    {
+            this.items.unshift(item);
+        }
+        else
+        {
+            var i = this.itemID2Index[prevName];
+            if (i == this.items.length-1)
+                this.items.push(item);
+            else
+                this.items.splice(i+1, 0, item);
+        }
+        return item;
+	};
+	ItemListKlassProto.remove_item = function(snapshot)
+	{
+	    var k = get_key(snapshot);
+	    var i = this.itemID2Index[k];
+	    var item = this.items[i];
+	    cr.arrayRemove(this.items, i);
+	    return item;
+	};
+	ItemListKlassProto.update_itemID2Index = function()
+	{
+	    clean_table(this.itemID2Index);
+	    var i,cnt = this.items.length;
+	    for (i=0; i<cnt; i++)
+	    {
+	        this.itemID2Index[this.items[i][this.keyItemID]] = i;
+	    }
+	};
+    ItemListKlassProto.manual_update = function(query)
+    {
+        var self=this;
+        var read_item = function(childSnapshot)
+        {
+            self.add_item(childSnapshot, null, true);
+        };
+        var handler = function (snapshot)
+        {
+            snapshot["forEach"](read_item);
+            self.update_itemID2Index();
+            if (self.onItemsFetch)
+                self.onItemsFetch(self.items)
+        };
+        query["once"]("value", handler);
+    };
+    ItemListKlassProto.auto_child_update_start = function(query)
+    {
+        var self = this;
+	    var add_child_handler = function (newSnapshot, prevName)
+	    {
+	        var item = self.add_item(newSnapshot, prevName);
+	        self.update_itemID2Index();
+	        if (self.onItemAdd)
+	            self.onItemAdd(item);
+	    };
+	    var remove_child_handler = function (snapshot)
+	    {
+	        var item = self.remove_item(snapshot);
+	        self.update_itemID2Index();
+	        if (self.onItemRemove)
+	            self.onItemRemove(item);
+	    };
+	    var change_child_handler = function (snapshot, prevName)
+	    {
+	        var item = self.remove_item(snapshot);
+	        self.update_itemID2Index();
+	        self.add_item(snapshot, prevName);
+	        self.update_itemID2Index();
+	        if (self.onItemChange)
+	            self.onItemChange(item);
+	    };
+	    this.query = query;
+        this.add_child_handler = add_child_handler;
+        this.remove_child_handler = remove_child_handler;
+        this.change_child_handler = change_child_handler;
+	    query["on"]("child_added", add_child_handler);
+	    query["on"]("child_removed", remove_child_handler);
+	    query["on"]("child_moved", change_child_handler);
+	    query["on"]("child_changed", change_child_handler);
+    };
+    ItemListKlassProto.auto_child_update_stop = function ()
+	{
+        if (!this.query)
+            return;
+        this.query["off"]("child_added", this.add_child_handler);
+	    this.query["off"]("child_removed", this.remove_child_handler);
+	    this.query["off"]("child_moved", this.change_child_handler);
+	    this.query["off"]("child_changed", this.change_child_handler);
+        this.add_child_handler = null;
+        this.remove_child_handler = null;
+        this.change_child_handler = null;
+        this.query = null;
+	};
+    ItemListKlassProto.auto_all_update_start = function(query)
+    {
+        var self=this;
+        var read_item = function(childSnapshot)
+        {
+            self.add_item(childSnapshot, null, true);
+        };
+        var items_fetch_handler = function (snapshot)
+        {
+            self.Clean();
+            snapshot["forEach"](read_item);
+            self.update_itemID2Index();
+            if (self.onItemsFetch)
+                self.onItemsFetch(self.items)
+        };
+        this.query = query;
+        this.items_fetch_handler = items_fetch_handler;
+        query["on"]("value", items_fetch_handler);
+    };
+    ItemListKlassProto.auto_all_update_stop = function ()
+	{
+        if (!this.query)
+            return;
+        this.query["off"]("value", this.items_fetch_handler);
+        this.items_fetch_handler = null;
+        this.query = null;
+	};
+	var clean_table = function (o)
+	{
+	    var k;
+	    for (k in o)
+	        delete o[k];
+	};
+	window.FirebaseItemListKlass = ItemListKlass;
+    var CallbackMapKlass = function ()
+    {
+        this.map = {};
+    };
+    var CallbackMapKlassProto = CallbackMapKlass.prototype;
+	CallbackMapKlassProto.Reset = function(k)
+	{
+        for (var k in this.map)
+            delete this.map[k];
+	};
+	CallbackMapKlassProto.get_callback = function(absRef, eventType, cbName)
+	{
+        if (!this.IsExisted(absRef, eventType, cbName))
+            return null;
+        return this.map[absRef][eventType][cbName];
+	};
+    CallbackMapKlassProto.IsExisted = function (absRef, eventType, cbName)
+    {
+        if (!this.map.hasOwnProperty(absRef))
+            return false;
+        if (!eventType)  // don't check event type
+            return true;
+        var eventMap = this.map[absRef];
+        if (!eventMap.hasOwnProperty(eventType))
+            return false;
+        if (!cbName)  // don't check callback name
+            return true;
+        var cbMap = eventMap[eventType];
+        if (!cbMap.hasOwnProperty(cbName))
+            return false;
+        return true;
+    };
+	CallbackMapKlassProto.Add = function(query, eventType, cbName, cb)
+	{
+	    var absRef = query["toString"]();
+        if (this.IsExisted(absRef, eventType, cbName))
+            return;
+        if (!this.map.hasOwnProperty(absRef))
+            this.map[absRef] = {};
+        var eventMap = this.map[absRef];
+        if (!eventMap.hasOwnProperty(eventType))
+            eventMap[eventType] = {};
+        var cbMap = eventMap[eventType];
+        cbMap[cbName] = cb;
+	    query["on"](eventType, cb);
+	};
+	CallbackMapKlassProto.Remove = function(absRef, eventType, cbName)
+	{
+	    if ((absRef != null) && (typeof(absRef) == "object"))
+	        absRef = absRef["toString"]();
+        if (absRef && eventType && cbName)
+        {
+            var cb = this.get_callback(absRef, eventType, cbName);
+            if (cb == null)
+                return;
+            get_ref(absRef)["off"](eventType, cb);
+            delete this.map[absRef][eventType][cbName];
+        }
+        else if (absRef && eventType && !cbName)
+        {
+            var eventMap = this.map[absRef];
+            if (!eventMap)
+                return;
+            var cbMap = eventMap[eventType];
+            if (!cbMap)
+                return;
+            get_ref(absRef)["off"](eventType);
+            delete this.map[absRef][eventType];
+        }
+        else if (absRef && !eventType && !cbName)
+        {
+            var eventMap = this.map[absRef];
+            if (!eventMap)
+                return;
+            get_ref(absRef)["off"]();
+            delete this.map[absRef];
+        }
+        else if (!absRef && !eventType && !cbName)
+        {
+            for (var r in this.map)
+            {
+                get_ref(r)["off"]();
+                delete this.map[r];
+            }
+        }
+	};
+	CallbackMapKlassProto.RemoveAllCB = function(absRef)
+	{
+	    if (absRef)
+	    {
+            var eventMap = this.map[absRef];
+            for (var e in eventMap)
+            {
+                var cbMap = eventMap[e];
+                for (var cbName in cbMap)
+                {
+                    get_ref(absRef)["off"](e, cbMap[cbName]);
+                }
+            }
+            delete this.map[absRef];
+	    }
+	    else if (!absRef)
+	    {
+            for (var r in this.map)
+            {
+                var eventMap = this.map[r];
+                for (var e in eventMap)
+                {
+                    var cbMap = eventMap[e];
+                    for (var cbName in cbMap)
+                    {
+                        get_ref(r)["off"](e, cbMap[cbName]);
+                    }
+                }
+                delete this.map[r];
+            }
+        }
+	};
+    CallbackMapKlassProto.getDebuggerValues = function (propsections)
+    {
+        var r, eventMap, e, cbMap, cn, display;
+        for (r in this.map)
+        {
+            eventMap = this.map[r];
+            for (e in eventMap)
+            {
+                cbMap = eventMap[e];
+                for (cn in cbMap)
+                {
+                    display = cn+":"+e+"-"+r;
+                    propsections.push({"name": display, "value": ""});
+                }
+            }
+        }
+    };
+    CallbackMapKlassProto.GetRefMap = function ()
+    {
+        return this.map;
+    };
+	window.FirebaseCallbackMapKlass = CallbackMapKlass;
+    var getValueByKeyPath = function (item, k, default_value)
+    {
+        var v;
+        if (item == null)
+            v = null;
+        else if ((k == null) || (k === ""))
+            v = item;
+        else if (typeof(item) !== "object")
+            v = null;
+        else if (k.indexOf(".") === -1)
+            v = item[k];
+        else
+        {
+            v = item;
+            var keys = k.split(".");
+            var i, cnt=keys.length;
+            for(i=0; i<cnt; i++)
+            {
+                v = v[ keys[i] ];
+                if (v == null)
+                    break;
+            }
+        }
+        return din(v, default_value);
+    }
+    var din = function (d, default_value)
+    {
+        var o;
+	    if (d === true)
+	        o = 1;
+	    else if (d === false)
+	        o = 0;
+        else if (d == null)
+        {
+            if (default_value != null)
+                o = default_value;
+            else
+                o = 0;
+        }
+        else if (typeof(d) == "object")
+            o = JSON.stringify(d);
+        else
+            o = d;
+	    return o;
+    };
+	window.FirebaseGetValueByKeyPath = getValueByKeyPath;
+}());
+;
+;
+cr.plugins_.Rex_Firebase_Authentication = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Rex_Firebase_Authentication.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+        this.rootpath = this.properties[0];
+        this.isMyLoginCall = false;
+        this.isMyLogOutCall = false;
+        this.lastError = null;
+        this.lastAuthData = null;  // only used in 2.x
+        this.lastLoginResult = null; // only used in 3.x
+        var self=this;
+        var setupFn = function ()
+        {
+            self.setOnLogoutHandler();
+        }
+        window.FirebaseAddAfterInitializeHandler(setupFn);
+        window.FirebaseGetCurrentUserID = function()
+        {
+            return self.getCurrentUserID();
+        };
+	};
+	var isFirebase3x = function()
+	{
+        return (window["FirebaseV3x"] === true);
+    };
+	instanceProto.get_ref = function(k)
+	{
+        if (k == null)
+	        k = "";
+	    var path;
+	    if (k.substring(0,8) == "https://")
+	        path = k;
+	    else
+	        path = this.rootpath + k + "/";
+        return new window["Firebase"](path);
+	};
+    var getAuthObj = function()
+    {
+        return window["Firebase"]["auth"]();
+    };
+	instanceProto.setOnLogoutHandler = function()
+	{
+        var self = this;
+        var onAuthStateChanged = function (authData)
+        {
+            if (authData)
+            {
+                var isMyLoginCall = self.isMyLoginCall && !self.isMyLogOutCall;
+                self.lastError = null;
+                self.lastAuthData = authData;
+                if (!isMyLoginCall)
+                    self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoginByOther, self);
+                else
+                {
+                    self.isMyLoginCall = false;
+                    self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoginSuccessful, self);
+                }
+            }
+            else
+            {
+                var isMyLogOutCall = self.isMyLogOutCall;
+                self.isMyLogOutCall = false;
+                self.lastAuthData = null;
+                self.lastLoginResult = null;
+                if (!isMyLogOutCall)
+                    self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoggedOutByOther, self);
+                else
+                    self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoggedOut, self);
+            }
+        };
+        if (!isFirebase3x())
+        {
+            this.lastAuthData  = this.get_ref()["getAuth"]();
+            this.get_ref()["onAuth"](onAuthStateChanged);
+        }
+        else
+        {
+            getAuthObj()["onAuthStateChanged"](onAuthStateChanged);
+        }
+	};
+    instanceProto.getCurrentUserID = function()
+    {
+        var uid;
+        if (!isFirebase3x())
+            uid = (this.lastAuthData)? this.lastAuthData["uid"]:"";
+        else
+            uid = getUserProperty3x("uid");
+        return uid;
+    }
+	function Cnds() {};
+	pluginProto.cnds = new Cnds();
+	Cnds.prototype.EmailPassword_OnCreateAccountSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnCreateAccountError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnChangingPasswordSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnChangingPasswordError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnSendPasswordResetEmailSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnSendPasswordResetEmailError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnDeleteUserSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnDeleteUserError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnUpdatingProfileSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnUpdatingProfileError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnUpdatingEmailSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnUpdatingEmailError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnSendVerificationEmailSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.EmailPassword_OnSendVerificationEmailError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.IsAnonymous = function ()
+	{
+        var val;
+        if (!isFirebase3x())
+        {
+            var user = this.lastAuthData;
+            if (user)
+                val = (user["provider"] === "anonymous");
+            else
+                val = false;
+        }
+        else
+        {
+            var user = getAuthObj()["currentUser"];
+            val = user && user["isAnonymous"];
+        }
+        return val;
+	};
+	Cnds.prototype.OnLoginSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnLoginError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnLoggedOut = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.IsLogin = function ()
+	{
+        if (!isFirebase3x())
+            return (this.lastAuthData != null);
+        else
+            return (getAuthObj()["currentUser"] != null);
+	};
+	Cnds.prototype.OnLoginByOther = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnLoggedOutByOther = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnLinkSuccessful = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnLinkError = function ()
+	{
+	    return true;
+	};
+	function Acts() {};
+	pluginProto.acts = new Acts();
+	var getHandler2x = function(self, successTrig, errorTrig)
+	{
+	    var handler = function(error, authData)
+        {
+            self.lastError = error;
+            self.lastAuthData = authData;
+            if (error == null)
+            {
+                self.runtime.trigger(successTrig, self);
+            }
+            else
+            {
+                self.runtime.trigger(errorTrig, self);
+            }
+        };
+        return handler;
+    };
+	var getLoginHandler2x = function(self)
+	{
+	    var handler = function(error, authData)
+        {
+            self.lastError = error;
+            self.lastAuthData = authData;
+            if (error == null)
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoginSuccessful, self);
+            }
+            else
+            {
+                self.isMyLoginCall = false;
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoginError, self);
+            }
+        };
+        self.isMyLoginCall = true;
+        return handler;
+    };
+    var addHandler = function (self, authObj, successTrig, errorTrig)
+    {
+        var onSuccess = function (result)
+        {
+            self.lastError = null;
+            self.lastAuthData = result;
+            if (successTrig)
+                self.runtime.trigger(successTrig, self);
+        };
+        var onError = function (error)
+        {
+            self.lastError = error;
+            self.lastAuthData = null;
+            if (errorTrig)
+                self.runtime.trigger(errorTrig, self);
+        };
+        authObj["then"](onSuccess)["catch"](onError);
+    };
+    var addLoginHandler = function (self, authObj)
+    {
+        var onSuccess = function (result)
+        {
+            self.lastLoginResult = result;
+        };
+        var onError = function (error)
+        {
+            self.isMyLoginCall = false;
+            self.lastError = error;
+            self.lastLoginResult = null;
+            self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLoginError, self);
+        };
+        self.isMyLoginCall = true;
+        authObj["then"](onSuccess)["catch"](onError);
+    }
+    Acts.prototype.EmailPassword_CreateAccount = function (e_, p_)
+	{
+        if (!isFirebase3x())
+        {
+	        var reg_data = {"email":e_,  "password":p_ };
+	        var handler = getHandler2x(this,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnCreateAccountSuccessful,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnCreateAccountError);
+	        this.get_ref()["createUser"](reg_data, handler);
+        }
+        else
+        {
+            var authObj = getAuthObj()["createUserWithEmailAndPassword"](e_, p_);
+            addHandler(this, authObj,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnCreateAccountSuccessful,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnCreateAccountError
+                              );
+        }
+	};
+    var PRESISTING_TYPE = ["default", "sessionOnly", "never"];
+    Acts.prototype.EmailPassword_Login = function (e_, p_, r_)
+	{
+        if (!isFirebase3x())
+        {
+	        var reg_data = {"email":e_,  "password":p_ };
+	        var handler = getLoginHandler2x(this);
+            var d = {"remember":PRESISTING_TYPE[r_]};
+	        this.get_ref()["authWithPassword"](reg_data, handler, d);
+        }
+        else
+        {
+            var authObj = getAuthObj();
+            addLoginHandler(this, authObj["signInWithEmailAndPassword"](e_, p_));
+        }
+	};
+    Acts.prototype.EmailPassword_ChangePassword = function (e_, old_p_, new_p_)
+	{
+        if (!isFirebase3x())
+        {
+	        var reg_data = {"email":e_,  "oldPassword ":old_p_,  "newPassword":new_p_};
+	        var handler = getHandler2x(this,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnChangingPasswordSuccessful,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnChangingPasswordError);
+	        this.get_ref()["changePassword"](reg_data, handler);
+        }
+        else
+        {
+            var authObj = getAuthObj()["currentUser"]["updatePassword"](new_p_);
+            addHandler(this, authObj,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnChangingPasswordSuccessful,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnChangingPasswordError
+                              );
+        }
+	};
+    Acts.prototype.EmailPassword_SendPasswordResetEmail = function (e_)
+	{
+        if (!isFirebase3x())
+        {
+	        var reg_data = {"email":e_};
+	        var handler = getHandler2x(this,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendPasswordResetEmailSuccessful,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendPasswordResetEmailError);
+	        this.get_ref()["resetPassword"](reg_data, handler);
+        }
+        else
+        {
+            var authObj = getAuthObj()["sendPasswordResetEmail"](e_);
+            addHandler(this, authObj,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendPasswordResetEmailSuccessful,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendPasswordResetEmailError
+                              );
+        }
+	};
+    Acts.prototype.EmailPassword_DeleteUser = function (e_, p_)
+	{
+        if (!isFirebase3x())
+        {
+	        var reg_data = {"email":e_,  "password":p_};
+	        var handler = getHandler2x(this,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnDeleteUserSuccessful,
+	                                     cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnDeleteUserError);
+	        this.get_ref()["removeUser"](reg_data, handler);
+        }
+        else
+        {
+            var authObj = getAuthObj()["currentUser"]["delete"]();
+            addHandler(this, authObj,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnDeleteUserSuccessful,
+                              cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnDeleteUserError
+                              );
+        }
+	};
+    Acts.prototype.Anonymous_Login = function (r_)
+	{
+        if (!isFirebase3x())
+        {
+	        var handler = getLoginHandler2x(this);
+            var d = {"remember":PRESISTING_TYPE[r_]};
+	        this.get_ref()["authAnonymously"](handler, d);
+        }
+        else
+        {
+            var authObj = getAuthObj();
+            addLoginHandler(this, authObj["signInAnonymously"]());
+        }
+	};
+    Acts.prototype.AuthenticationToken_Login = function (t_, r_)
+	{
+        if (!isFirebase3x())
+        {
+	        var handler = getLoginHandler2x(this);
+            var d = {"remember":PRESISTING_TYPE[r_]};
+	        this.get_ref()["authWithCustomToken"](t_, handler, d);
+        }
+        else
+        {
+            var authObj = getAuthObj();
+            addLoginHandler(this, authObj["signInWithCustomToken"]());
+        }
+	};
+	var PROVIDER_TYPE2x = ["facebook", "twitter", "github", "google"];
+    var capitalizeFirstLetter = function (s)
+    {
+        return s.charAt(0).toUpperCase() + s.slice(1);
+    };
+    Acts.prototype.ProviderAuthentication_Login = function (provider, t_, r_, scope_)
+	{
+        if (!isFirebase3x())
+        {
+            if (typeof(provider) === "number")
+                provider = PROVIDER_TYPE2x[provider];
+            var loginType = (t_ === 0)? "authWithOAuthPopup":"authWithOAuthRedirect";
+	        var handler = getLoginHandler2x(this);
+            var d = {"remember":PRESISTING_TYPE[r_],
+                     "scope":scope_};
+	        this.get_ref()[loginType](provider, handler, d);
+        }
+        else
+        {
+            if (typeof(provider) === "number")
+                provider = PROVIDER_TYPE2x[provider];
+            provider = capitalizeFirstLetter( provider) + "AuthProvider";
+            var providerObj = new window["Firebase"]["auth"][provider]();
+            if (scope_ !== "")
+                providerObj["addScope"](scope_);
+            var authObj = getAuthObj();
+            if (t_ === 0)    // signInWithPopup
+            {
+                addLoginHandler(this, authObj["signInWithPopup"](providerObj));
+            }
+            else    // signInWithRedirect
+            {
+                authObj["signInWithRedirect"](providerObj);
+                addLoginHandler(this, authObj["getRedirectResult"]());
+            }
+        }
+	};
+    Acts.prototype.AuthWithOAuthToken_FB = function (access_token, r_, scope_)
+	{
+        if (access_token == "")
+        {
+	        if (typeof (FB) == null)
+	         return;
+	         var auth_response = FB["getAuthResponse"]();
+	         if (!auth_response)
+	             return;
+	        access_token = auth_response["accessToken"];
+        }
+        if (!isFirebase3x())
+        {
+	        var handler = getLoginHandler2x(this);
+            var d = {"remember":PRESISTING_TYPE[r_],
+                     "scope":scope_};
+            this.get_ref()["authWithOAuthToken"]("facebook", access_token, handler, d);
+        }
+        else
+        {
+            var credential = window["Firebase"]["auth"]["FacebookAuthProvider"]["credential"](access_token);
+            var authObj = getAuthObj();
+            addLoginHandler(this, authObj["signInWithCredential"](credential));
+        }
+	};
+    Acts.prototype.LoggingOut = function ()
+	{
+        this.isMyLogOutCall = true;
+        if (!isFirebase3x())
+        {
+	        this.get_ref()["unauth"]();
+        }
+        else
+        {
+            var authObj = getAuthObj()["signOut"]();
+        }
+	};
+    Acts.prototype.GoOffline = function ()
+	{
+        if (!isFirebase3x())
+        {
+	        window["Firebase"]["goOffline"]();
+        }
+        else
+        {
+            window["Firebase"]["database"]()["goOffline"]();
+        }
+	};
+    Acts.prototype.GoOnline = function ()
+	{
+        if (!isFirebase3x())
+        {
+	        window["Firebase"]["goOnline"]();
+        }
+        else
+        {
+            window["Firebase"]["database"]()["goOnline"]();
+        }
+	};
+    Acts.prototype.LinkToFB = function (access_token)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        var user = getAuthObj()["currentUser"];
+        if (user == null)
+        {
+            return;
+        }
+        if (access_token == "")
+        {
+	        if (typeof (FB) == null)
+	            return;
+	        var auth_response = FB["getAuthResponse"]();
+	        if (!auth_response)
+	            return;
+	        access_token = auth_response["accessToken"];
+        }
+        var credential = window["Firebase"]["auth"]["FacebookAuthProvider"]["credential"](access_token);
+        var authObj = user["link"](credential);
+        addHandler(this, authObj,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkSuccessful,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkError
+                          );
+	};
+    Acts.prototype.LinkToGoogle = function (id_token)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        var user = getAuthObj()["currentUser"];
+        if (user == null)
+        {
+            return;
+        }
+        var credential = window["Firebase"]["auth"]["GoogleAuthProvider"]["credential"](id_token);
+        var authObj = user["link"](credential);
+        addHandler(this, authObj,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkSuccessful,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkError
+                          );
+	};
+    Acts.prototype.LinkToEmailPassword = function (e_, p_)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        var user = getAuthObj()["currentUser"];
+        if (user == null)
+        {
+            return;
+        }
+        var credential = window["Firebase"]["auth"]["EmailAuthProvider"]["credential"](e_, p_);
+        var authObj = user["link"](credential);
+        addHandler(this, authObj,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkSuccessful,
+                          cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.OnLinkError
+                          );
+	};
+    Acts.prototype.UpdateProfile = function (displayName, photoURL)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        else
+        {
+            var self = this;
+            var user = getAuthObj()["currentUser"];
+            var data = {
+                "displayName": displayName,
+                "photoURL": photoURL,
+            }
+            var onSuccess = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnUpdatingProfileSuccessful, self);
+            };
+            var onError = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnUpdatingProfileError, self);
+            };
+            user["updateProfile"](data)["then"](onSuccess)["catch"](onError);
+        }
+	};
+    Acts.prototype.UpdateEmail = function (email)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        else
+        {
+            var self = this;
+            var user = getAuthObj()["currentUser"];
+            var onSuccess = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnUpdatingEmailSuccessful, self);
+            };
+            var onError = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnUpdatingEmailError, self);
+            };
+            user["updateEmail"](email)["then"](onSuccess)["catch"](onError);
+        }
+	};
+    Acts.prototype.SendEmailVerification = function (email)
+	{
+        if (!isFirebase3x())
+        {
+            alert("Does not support in firebase 2.x api");
+	        return;
+        }
+        else
+        {
+            var self = this;
+            var user = getAuthObj()["currentUser"];
+            var onSuccess = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendVerificationEmailSuccessful, self);
+            };
+            var onError = function ()
+            {
+                self.runtime.trigger(cr.plugins_.Rex_Firebase_Authentication.prototype.cnds.EmailPassword_OnSendVerificationEmailError, self);
+            };
+            user["sendEmailVerification"]()["then"](onSuccess)["catch"](onError);
+        }
+	};
+	function Exps() {};
+	pluginProto.exps = new Exps();
+    var getProviderProperty = function (authData, p)
+    {
+		if (authData == null)
+		    return "";
+		var provide_type = authData["provider"];
+		var provider_info = authData[provide_type];
+		if (provider_info == null)
+		    return "";
+		var val = provider_info[p];
+		if (val == null)
+		    val = "";
+        return val;
+    };
+    var getUserProperty3x = function(p)
+    {
+        var user = getAuthObj()["currentUser"];
+        return (user)? user[p]:"";
+    };
+    var getProviderProperty3x = function (p, idx)
+    {
+		var user = getAuthObj()["currentUser"];
+        if (!user)
+            return "";
+        if (idx == null) idx = 0;
+        var providerData = user["providerData"][idx];
+        var val = (providerData)? providerData[p]:"";
+        return val;
+    };
+	Exps.prototype.ErrorCode = function (ret)
+	{
+	    var val = (!this.lastError)? "": this.lastError["code"];
+		ret.set_string(val || "");
+	};
+	Exps.prototype.ErrorMessage = function (ret)
+	{
+	    var val = (!this.lastError)? "": this.lastError["message"];
+		ret.set_string(val || "");
+	};
+	Exps.prototype.UserID = function (ret)
+	{
+		ret.set_string(this.getCurrentUserID() || "");
+	};
+	Exps.prototype.Provider = function (ret)
+	{
+        var pid;
+        if (!isFirebase3x())
+        {
+            pid = (!this.lastAuthData)? "": this.lastAuthData["provider"];
+        }
+        else
+        {
+            pid = getProviderProperty3x("providerId");
+        }
+		ret.set_string(pid);
+	};
+	Exps.prototype.DisplayName = function (ret)
+	{
+        var name;
+        if (!isFirebase3x())
+        {
+            name = getProviderProperty(this.lastAuthData, "displayName");
+        }
+        else
+        {
+            name = getUserProperty3x("displayName");
+        }
+		ret.set_string(name || "");
+	};
+	Exps.prototype.UserIDFromProvider = function (ret)
+	{
+        var uid;
+        if (!isFirebase3x())
+        {
+            uid = getProviderProperty(this.lastAuthData, "id");
+        }
+        else
+        {
+            uid = getProviderProperty3x("uid");
+        }
+		ret.set_string(uid || "");
+	};
+	Exps.prototype.AccessToken = function (ret)
+	{
+        var token;
+        if (!isFirebase3x())
+        {
+            token = getProviderProperty(this.lastAuthData, "accessToken");
+        }
+        else
+        {
+            if (this.lastLoginResult && this.lastLoginResult["credential"])
+                token = this.lastLoginResult["credential"]["accessToken"];
+        }
+		ret.set_string(token || "");
+	};
+	Exps.prototype.CachedUserProfile = function (ret)
+	{
+        var profile;
+        if (!isFirebase3x())
+        {
+            profile = getProviderProperty(this.lastAuthData, "cachedUserProfile");
+        }
+        else
+        {
+            alert("CachedUserProfile had not implemented in firebase 3.x");
+        }
+        ret.set_string( profile || "" );
+	};
+	Exps.prototype.Email = function (ret)
+	{
+        var email;
+        if ((!isFirebase3x()))
+        {
+            email = getProviderProperty(this.lastAuthData, "email");
+        }
+        else
+        {
+            email = getUserProperty3x("email");
+        }
+		ret.set_string(email || "");
+	};
+	Exps.prototype.UserName = function (ret)
+	{
+        var name;
+        if (!isFirebase3x())
+        {
+            name = getProviderProperty(this.lastAuthData, "username");
+        }
+        else
+        {
+            name = getUserProperty3x("displayName");
+        }
+		ret.set_string(name || "");
+	};
+	Exps.prototype.ErrorDetail = function (ret)
+	{
+	    var val = (!this.lastError)? "": this.lastError["detail"];
+        if (val == null)
+            val = "";
+		ret.set_string(val);
+	};
+	Exps.prototype.PhotoURL = function (ret)
+	{
+        var name;
+        if (!isFirebase3x())
+        {
+            name = "";
+        }
+        else
+        {
+            name = getUserProperty3x("photoURL");
+        }
+		ret.set_string(name || "");
+	};
+}());
+/*
+<UserID>
+    name - user name
+	score - score
+	extra - extra data like photo
+	updateAt - timestamp of last score updating
+*/
+;
+;
+cr.plugins_.Rex_Firebase_Leaderboard = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Rex_Firebase_Leaderboard.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+	    this.rootpath = this.properties[0] + "/" + this.properties[1] + "/";
+		this.ranking_order = this.properties[2];
+	    this.ranks = this.create_ranks(this.properties[3]==1);
+	    this.exp_CurRankCol = null;
+	    this.exp_CurPlayerRank = -1;
+	    this.exp_PostPlayerName = "";
+        this.exp_PostPlayerScore = 0;
+        this.exp_PostPlayerUserID = "";
+        this.exp_PostExtraData = "";
+		this.exp_LastUserID = "";
+		this.exp_LastScore = 0;
+		this.exp_LastPlayerName = "";
+	};
+	instanceProto.onDestroy = function ()
+	{
+	    this.ranks.StopUpdate();
+	};
+	var isFirebase3x = function()
+	{
+        return (window["FirebaseV3x"] === true);
+    };
+    var isFullPath = function (p)
+    {
+        return (p.substring(0,8) === "https://");
+    };
+	instanceProto.get_ref = function(k)
+	{
+        if (k == null)
+	        k = "";
+	    var path;
+	    if (isFullPath(k))
+	        path = k;
+	    else
+	        path = this.rootpath + k + "/";
+        if (!isFirebase3x())
+        {
+            return new window["Firebase"](path);
+        }
+        else
+        {
+            var fnName = (isFullPath(path))? "refFromURL":"ref";
+            return window["Firebase"]["database"]()[fnName](path);
+        }
+	};
+    var get_key = function (obj)
+    {
+        return (!isFirebase3x())?  obj["key"]() : obj["key"];
+    };
+    var get_root = function (obj)
+    {
+        return (!isFirebase3x())?  obj["root"]() : obj["root"];
+    };
+    var serverTimeStamp = function ()
+    {
+        if (!isFirebase3x())
+            return window["Firebase"]["ServerValue"]["TIMESTAMP"];
+        else
+            return window["Firebase"]["database"]["ServerValue"];
+    };
+    var get_timestamp = function (obj)
+    {
+        return (!isFirebase3x())?  obj : obj["TIMESTAMP"];
+    };
+	instanceProto.create_ranks = function(isAutoUpdate)
+	{
+	    var ranks = new window.FirebaseItemListKlass();
+	    ranks.updateMode = (isAutoUpdate)? ranks.AUTOCHILDUPDATE : ranks.MANUALUPDATE;
+	    ranks.keyItemID = "userID";
+	    var self = this;
+	    var on_update = function()
+	    {
+	        self.runtime.trigger(cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.OnUpdate, self);
+	    };
+	    ranks.onItemsFetch = on_update;
+        ranks.onItemAdd = on_update;
+        ranks.onItemRemove = on_update;
+        ranks.onItemChange = on_update;
+	    var onGetIterItem = function(item, i)
+	    {
+	        self.exp_CurRankCol = item;
+	        self.exp_CurPlayerRank = i;
+	    };
+	    ranks.onGetIterItem = onGetIterItem;
+        return ranks;
+    };
+    instanceProto.update_ranks = function (count)
+	{
+	    var query = this.get_ref();
+		if (count == -1)  // update all
+		{
+		}
+		else
+		{
+		    query = query["orderByPriority"]()["limitToFirst"](count);
+		}
+		this.ranks.StartUpdate(query);
+	};
+    var get_extraData = function (extra_data)
+    {
+        var save_extra_data;
+        if (extra_data == "")
+        {
+            save_extra_data = null;
+        }
+        else
+        {
+            try
+            {
+	            save_extra_data = JSON.parse(extra_data)
+            }
+            catch(err)
+            {
+                save_extra_data = extra_data;
+            }
+        }
+        return save_extra_data;
+    }
+    instanceProto.post_score = function (userID, name, score, extra_data)
+	{
+        extra_data = get_extraData(extra_data);
+	    var self = this;
+	    var onComplete = function(error)
+	    {
+            self.onPostComplete.call(self, error, userID, name, score, extra_data);
+        };
+        var save_data = {"name":name,
+                         "score":score,
+                         "extra": extra_data,
+                         "updateAt": serverTimeStamp()
+                        };
+        var priority = (this.ranking_order == 0)? score:-score;
+        var ref = this.get_ref();
+	    ref["child"](userID)["setWithPriority"](save_data, priority, onComplete);
+	};
+	instanceProto.onPostComplete = function(error, userID, name, score, extra_data)
+	{
+	    this.exp_PostPlayerName = name;
+        this.exp_PostPlayerScore = score;
+        this.exp_PostPlayerUserID = userID;
+        this.exp_PostExtraData = extra_data;
+	    var trig = (error)? cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.OnPostError:
+	                        cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.OnPostComplete;
+	    this.runtime.trigger(trig, this);
+    };
+	function Cnds() {};
+	pluginProto.cnds = new Cnds();
+	Cnds.prototype.OnPostComplete = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnPostError = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.OnUpdate = function ()
+	{
+	    return true;
+	};
+	Cnds.prototype.ForEachRank = function (start, end)
+	{
+		return this.ranks.ForEachItem(this.runtime, start, end);
+	};
+	Cnds.prototype.OnGetScore = function ()
+	{
+	    return true;
+	};
+	function Acts() {};
+	pluginProto.acts = new Acts();
+    Acts.prototype.SetDomainRef = function (ref, ID_)
+	{
+	    this.ranks.StopUpdate();
+	    this.rootpath = ref + "/" + ID_ + "/";
+	};
+    Acts.prototype.PostScore = function (userID, name, score, extra_data, post_cond)
+	{
+        if (post_cond !== 0)
+        {
+            var self=this;
+            var onReadScore = function(snapshot)
+            {
+                var preScore = snapshot["val"]();
+                var doPosting;
+                if (post_cond === 1)
+                    doPosting = (score > preScore);
+                else if (post_cond === 2)
+                    doPosting = (score < preScore);
+                else if (post_cond === 3)
+                    doPosting = (preScore == null) ;
+                if (doPosting)
+                    self.post_score(userID, name, score, extra_data);
+                else
+                {
+                    self.onPostComplete.call(self, false, userID, name, preScore, extra_data);
+                }
+            };
+            var ref = this.get_ref()["child"](userID)["child"]("score");
+	        ref["once"]("value", onReadScore)
+        }
+        else
+        {
+            this.post_score(userID, name, score, extra_data);
+        }
+	};
+    Acts.prototype.UpdateAllRanks = function ()
+	{
+	    this.update_ranks(-1);
+	};
+    Acts.prototype.UpdateTopRanks = function (count)
+	{
+	    this.update_ranks(count);
+	};
+    Acts.prototype.RemovePost = function (userID)
+	{
+	    var ref = this.get_ref();
+	    ref["child"](userID)["remove"]();
+	};
+    Acts.prototype.StopUpdating = function ()
+	{
+        this.ranks.StopUpdate();
+	};
+    Acts.prototype.AddScore = function (userID, name, scoreAddTo, extra_data)
+	{
+        extra_data = get_extraData(extra_data);
+	    var self = this;
+	    var on_complete = function(error, committed, snapshot)
+	    {
+            var val = snapshot["val"]();
+            self.onPostComplete.call(self, error, userID, name, val["score"], extra_data);
+        };
+        var on_transaction = function (currentValue)
+        {
+            var old_score = (currentValue == null)? 0: currentValue["score"];
+            var new_score = old_score + scoreAddTo;
+            var save_data = {"name":name,
+                                       "score":new_score,
+                                       "extra": extra_data,
+                                       "updateAt": serverTimeStamp()
+                                      };
+            var priority = (self.ranking_order == 0)? new_score:-new_score;
+            return { '.value': save_data, '.priority': priority };
+        };
+        var ref = this.get_ref();
+	    ref["child"](userID)["transaction"](on_transaction, on_complete);
+	};
+    Acts.prototype.GetScore = function (userID)
+	{
+        var self=this;
+        var onReadUserID = function(snapshot)
+        {
+			var userData = snapshot["val"]();
+            if (userData)
+			{
+				self.exp_LastUserID = userID;
+				self.exp_LastScore = userData["score"];
+				self.exp_LastPlayerName = userData["name"];
+			}
+			else
+			{
+				self.exp_LastUserID = "";
+				self.exp_LastScore = 0;
+				self.exp_LastPlayerName = "";
+			}
+            self.runtime.trigger(cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.OnGetScore, self);
+        };
+		var ref = this.get_ref()["child"](userID);
+		ref["once"]("value", onReadUserID);
+	};
+	function Exps() {};
+	pluginProto.exps = new Exps();
+	Exps.prototype.CurPlayerName = function (ret)
+	{
+	    var name;
+	    if (this.exp_CurRankCol != null)
+	        name = this.exp_CurRankCol["name"];
+	    else
+	        name = "";
+		ret.set_string(name);
+	};
+	Exps.prototype.CurPlayerScore = function (ret)
+	{
+	    var score;
+	    if (this.exp_CurRankCol != null)
+	        score = this.exp_CurRankCol["score"];
+	    else
+	        score = 0;
+		ret.set_any(score);
+	};
+	Exps.prototype.CurPlayerRank = function (ret)
+	{
+		ret.set_int(this.exp_CurPlayerRank);
+	};
+	Exps.prototype.CurUserID = function (ret)
+	{
+	    var userID;
+	    if (this.exp_CurRankCol != null)
+	        userID = this.exp_CurRankCol["userID"];
+	    else
+	        userID = "";
+		ret.set_string(this.exp_CurRankCol["userID"]);
+	};
+	Exps.prototype.CurExtraData = function (ret)
+	{
+	    var extra_data = this.exp_CurRankCol["extra"];
+	    if (extra_data == null)
+	    {
+	        extra_data = "";
+	    }
+	    else if (typeof(extra_data) == "object")
+	    {
+	        extra_data = JSON.stringify(extra_data);
+	        this.exp_CurRankCol["extra"] = extra_data;
+	    }
+		ret.set_any(extra_data);
+	};
+	Exps.prototype.PostPlayerName = function (ret)
+	{
+		ret.set_string(this.exp_PostPlayerName);
+	};
+	Exps.prototype.PostPlayerScore = function (ret)
+	{
+		ret.set_any(this.exp_PostPlayerScore);
+	};
+	Exps.prototype.PostPlayerUserID = function (ret)
+	{
+		ret.set_string(this.exp_PostPlayerUserID);
+	};
+	Exps.prototype.PostExtraData = function (ret)
+	{
+		ret.set_any(this.exp_PostExtraData);
+	};
+	Exps.prototype.RankCount = function (ret)
+	{
+		ret.set_int(this.ranks.GetItems().length);
+	};
+	Exps.prototype.UserID2Rank = function (ret, userID)
+	{
+	    var rank = this.ranks.GetItemIndexByID(userID);
+	    if (rank == null)
+	        rank = -1;
+		ret.set_int(rank);
+	};
+	Exps.prototype.Rank2PlayerName = function (ret, i)
+	{
+	    var rank_info = this.ranks.GetItems()[i];
+	    var name = (!rank_info)? "":rank_info["name"];
+		ret.set_string(name);
+	};
+	Exps.prototype.Rank2PlayerScore = function (ret, i)
+	{
+	    var rank_info = this.ranks.GetItems()[i];
+	    var score = (!rank_info)? "":rank_info["score"];
+		ret.set_any(score);
+	};
+	Exps.prototype.Rank2ExtraData = function (ret, i)
+	{
+	    var rank_info = this.ranks.GetItems()[i];
+	    var extra_data = (!rank_info)? "":rank_info["extra"];
+		ret.set_any(extra_data);
+	};
+	Exps.prototype.Rank2PlayerUserID = function (ret, i)
+	{
+	    var rank_info = this.ranks.GetItems()[i];
+	    var extra_data = (!rank_info)? "":rank_info["userID"];
+		ret.set_any(extra_data);
+	};
+	Exps.prototype.LastUserID = function (ret)
+	{
+		ret.set_string(this.exp_LastUserID);
+	};
+	Exps.prototype.LastScore = function (ret)
+	{
+		ret.set_any(this.exp_LastScore);
+	};
+	Exps.prototype.LastPlayerName = function (ret)
+	{
+		ret.set_any(this.exp_LastPlayerName);
 	};
 }());
 ;
@@ -29447,6 +31549,116 @@ cr.plugins_.Rex_SequenceMatcher = function(runtime)
 	{
 	    return this._buf.join(separator);
 	};
+}());
+;
+;
+cr.plugins_.Rex_SimulateInput = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.Rex_SimulateInput.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	var dummyoffset = {left: 0, top: 0};
+    var elem = jQuery(document);
+	instanceProto.onCreate = function()
+	{
+        this.touchStyle = (window.navigator["pointerEnabled"])? 0:
+                                   (window.navigator["pointerEnabled"])? 1:
+                                   2;
+        this.useMouseInput = null;
+	};
+	instanceProto.onDestroy = function ()
+	{
+	};
+    instanceProto.GetUseMouseInput = function()
+    {
+        if (this.useMouseInput !== null)
+            return this.useMouseInput;
+        var plugins = this.runtime.types;
+        var name, inst;
+        for (name in plugins)
+        {
+            inst = plugins[name].instances[0];
+            if ( (cr.plugins_.Touch && (inst instanceof cr.plugins_.Touch.prototype.Instance)) ||
+                 (cr.plugins_.rex_TouchWrap && (inst instanceof cr.plugins_.rex_TouchWrap.prototype.Instance)) )
+            {
+                this.useMouseInput = inst.useMouseInput;
+                return this.useMouseInput;
+            }
+        }
+        this.useMouseInput = false;
+        return this.useMouseInput;
+    };
+	instanceProto.triggerTouchEvent = function (evetNames, info)
+	{
+        var name = evetNames[this.touchStyle];
+        var e = jQuery["Event"]( name, info );
+        elem["trigger"]( e );
+        if (this.GetUseMouseInput())
+        {
+            var e = jQuery["Event"]( evetNames[3], info );
+            elem["trigger"]( e );
+        }
+	};
+    var pos = {x:0, y:0};
+	instanceProto.layerxy2canvasxy = function (x, y, layer)
+	{
+		var offset = (this.runtime.isDomFree)? dummyoffset : jQuery(this.runtime.canvas).offset();
+        pos.x = layer.layerToCanvas(x, y, true) + offset.left;
+        pos.y = layer.layerToCanvas(x, y, false) + offset.top;
+        return pos;
+	};
+	function Cnds() {};
+	pluginProto.cnds = new Cnds();
+	function Acts() {};
+	pluginProto.acts = new Acts();
+    var KEYBOARD_EVENTTYPE = ["keydown", "keyup", "keypress"];
+    Acts.prototype.SimulateKeyboard = function (code, event_type)
+	{
+        var e = jQuery["Event"]( KEYBOARD_EVENTTYPE[event_type], { "keyCode": code, "which": code } );
+        elem["trigger"]( e );
+	};
+    var TouchStartEvtNames = ["pointerdown", "MSPointerDown", "touchstart", "mousedown"];
+    var TouchEndEvtNames = ["pointerup", "MSPointerUp", "touchend", "mouseup"];
+    var TouchMoveEvtNames = ["pointermove", "MSPointerMove", "touchmove", "mousemove"];
+    Acts.prototype.SimulateTouchStart = function (x, y, layer, identifier)
+	{
+        var pos = this.layerxy2canvasxy(x, y, layer);
+        var evetName = TouchStartEvtNames[this.touchStyle];
+        var info = { "pageX":pos.x, "pageY":pos.y, "identifier":identifier };
+        this.triggerTouchEvent(TouchStartEvtNames, info);
+	};
+    Acts.prototype.SimulateTouchEnd = function (identifier)
+	{
+        var evetName = TouchEndEvtNames[this.touchStyle];
+        var info = { "identifier":identifier };
+        this.triggerTouchEvent(TouchEndEvtNames, info);
+	};
+    Acts.prototype.SimulateTouchMove = function (x, y, layer, identifier)
+	{
+        var pos = this.layerxy2canvasxy(x, y, layer);
+        var evetName = TouchMoveEvtNames[this.touchStyle];
+        var info = { "pageX":pos.x, "pageY":pos.y, "identifier":identifier };
+        this.triggerTouchEvent(TouchMoveEvtNames, info);
+	};
+	function Exps() {};
+	pluginProto.exps = new Exps();
 }());
 ;
 ;
@@ -38651,6 +40863,1452 @@ cr.plugins_.rex_TagText = function(runtime)
         return img;
     };
     window.RexImageBank = new ImageBankKlass();
+}());
+;
+;
+cr.plugins_.rex_TouchWrap = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.rex_TouchWrap.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+		this.touches = [];
+		this.mouseDown = false;
+		this.touchDown = false;
+        this.check_name = "TOUCHWRAP";
+        this.cursor = {x:null, y:null};
+        this._callbackObjs = [];
+	    this.fake_ret = {value:0,
+	                     set_any: function(value){this.value=value;},
+	                     set_int: function(value){this.value=value;},
+                         set_float: function(value){this.value=value;},
+	                    };
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	var canvasOffset = {left: 0, top: 0};
+	instanceProto.findTouch = function (id)
+	{
+		var i, len;
+		for (i = 0, len = this.touches.length; i < len; i++)
+		{
+			if (this.touches[i]["id"] === id)
+				return i;
+		}
+		return -1;
+	};
+	var appmobi_accx = 0;
+	var appmobi_accy = 0;
+	var appmobi_accz = 0;
+	function AppMobiGetAcceleration(evt)
+	{
+		appmobi_accx = evt.x;
+		appmobi_accy = evt.y;
+		appmobi_accz = evt.z;
+	};
+	var pg_accx = 0;
+	var pg_accy = 0;
+	var pg_accz = 0;
+	function PhoneGapGetAcceleration(evt)
+	{
+		pg_accx = evt.x;
+		pg_accy = evt.y;
+		pg_accz = evt.z;
+	};
+	var theInstance = null;
+	var touchinfo_cache = [];
+	function AllocTouchInfo(x, y, id, index)
+	{
+		var ret;
+		if (touchinfo_cache.length)
+			ret = touchinfo_cache.pop();
+		else
+			ret = new TouchInfo();
+		ret.init(x, y, id, index);
+		return ret;
+	};
+	function ReleaseTouchInfo(ti)
+	{
+		if (touchinfo_cache.length < 100)
+			touchinfo_cache.push(ti);
+	};
+	var GESTURE_HOLD_THRESHOLD = 15;		// max px motion for hold gesture to register
+	var GESTURE_HOLD_TIMEOUT = 500;			// time for hold gesture to register
+	var GESTURE_TAP_TIMEOUT = 333;			// time for tap gesture to register
+	var GESTURE_DOUBLETAP_THRESHOLD = 25;	// max distance apart for taps to be
+	function TouchInfo()
+	{
+		this.starttime = 0;
+		this.time = 0;
+		this.lasttime = 0;
+		this.startx = 0;
+		this.starty = 0;
+		this.x = 0;
+		this.y = 0;
+		this.lastx = 0;
+		this.lasty = 0;
+		this["id"] = 0;
+		this.startindex = 0;
+		this.triggeredHold = false;
+		this.tooFarForHold = false;
+	};
+	TouchInfo.prototype.init = function (x, y, id, index)
+	{
+		var nowtime = cr.performance_now();
+		this.time = nowtime;
+		this.lasttime = nowtime;
+		this.starttime = nowtime;
+		this.startx = x;
+		this.starty = y;
+		this.x = x;
+		this.y = y;
+		this.lastx = x;
+		this.lasty = y;
+		this.width = 0;
+		this.height = 0;
+		this.pressure = 0;
+		this["id"] = id;
+		this.startindex = index;
+		this.triggeredHold = false;
+		this.tooFarForHold = false;
+	};
+	TouchInfo.prototype.update = function (nowtime, x, y, width, height, pressure)
+	{
+		this.lasttime = this.time;
+		this.time = nowtime;
+		this.lastx = this.x;
+		this.lasty = this.y;
+		this.x = x;
+		this.y = y;
+		this.width = width;
+		this.height = height;
+		this.pressure = pressure;
+		if (!this.tooFarForHold && cr.distanceTo(this.startx, this.starty, this.x, this.y) >= GESTURE_HOLD_THRESHOLD)
+		{
+			this.tooFarForHold = true;
+		}
+	};
+	TouchInfo.prototype.maybeTriggerHold = function (inst, index)
+	{
+		if (this.triggeredHold)
+			return;		// already triggered this gesture
+		var nowtime = cr.performance_now();
+		if (nowtime - this.starttime >= GESTURE_HOLD_TIMEOUT && !this.tooFarForHold && cr.distanceTo(this.startx, this.starty, this.x, this.y) < GESTURE_HOLD_THRESHOLD)
+		{
+			this.triggeredHold = true;
+			inst.trigger_index = this.startindex;
+			inst.trigger_id = this["id"];
+			inst.getTouchIndex = index;
+			inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnHoldGesture, inst);
+			inst.curTouchX = this.x;
+			inst.curTouchY = this.y;
+			inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnHoldGestureObject, inst);
+			inst.getTouchIndex = 0;
+		}
+	};
+	var lastTapX = -1000;
+	var lastTapY = -1000;
+	var lastTapTime = -10000;
+	TouchInfo.prototype.maybeTriggerTap = function (inst, index)
+	{
+		if (this.triggeredHold)
+			return;
+		var nowtime = cr.performance_now();
+		if (nowtime - this.starttime <= GESTURE_TAP_TIMEOUT && !this.tooFarForHold && cr.distanceTo(this.startx, this.starty, this.x, this.y) < GESTURE_HOLD_THRESHOLD)
+		{
+			inst.trigger_index = this.startindex;
+			inst.trigger_id = this["id"];
+			inst.getTouchIndex = index;
+			if ((nowtime - lastTapTime <= GESTURE_TAP_TIMEOUT * 2) && cr.distanceTo(lastTapX, lastTapY, this.x, this.y) < GESTURE_DOUBLETAP_THRESHOLD)
+			{
+				inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnDoubleTapGesture, inst);
+				inst.curTouchX = this.x;
+				inst.curTouchY = this.y;
+				inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnDoubleTapGestureObject, inst);
+				lastTapX = -1000;
+				lastTapY = -1000;
+				lastTapTime = -10000;
+			}
+			else
+			{
+				inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTapGesture, inst);
+				inst.curTouchX = this.x;
+				inst.curTouchY = this.y;
+				inst.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTapGestureObject, inst);
+				lastTapX = this.x;
+				lastTapY = this.y;
+				lastTapTime = nowtime;
+			}
+			inst.getTouchIndex = 0;
+		}
+	};
+	instanceProto.onCreate = function()
+	{
+		theInstance = this;
+		this.isWindows8 = !!(typeof window["c2isWindows8"] !== "undefined" && window["c2isWindows8"]);
+		this.orient_alpha = 0;
+		this.orient_beta = 0;
+		this.orient_gamma = 0;
+		this.acc_g_x = 0;
+		this.acc_g_y = 0;
+		this.acc_g_z = 0;
+		this.acc_x = 0;
+		this.acc_y = 0;
+		this.acc_z = 0;
+		this.curTouchX = 0;
+		this.curTouchY = 0;
+		this.trigger_index = 0;
+		this.trigger_id = 0;
+		this.getTouchIndex = 0;
+		this.useMouseInput = (this.properties[0] !== 0);
+		var elem = (this.runtime.fullscreen_mode > 0) ? document : this.runtime.canvas;
+		var elem2 = document;
+		if (this.runtime.isDirectCanvas)
+			elem2 = elem = window["Canvas"];
+		else if (this.runtime.isCocoonJs)
+			elem2 = elem = window;
+		var self = this;
+		if (typeof PointerEvent !== "undefined")
+		{
+			elem.addEventListener("pointerdown",
+				function(info) {
+					self.onPointerStart(info);
+				},
+				false
+			);
+			elem.addEventListener("pointermove",
+				function(info) {
+					self.onPointerMove(info);
+				},
+				false
+			);
+			elem2.addEventListener("pointerup",
+				function(info) {
+					self.onPointerEnd(info, false);
+				},
+				false
+			);
+			elem2.addEventListener("pointercancel",
+				function(info) {
+					self.onPointerEnd(info, true);
+				},
+				false
+			);
+			if (this.runtime.canvas)
+			{
+				this.runtime.canvas.addEventListener("MSGestureHold", function(e) {
+					e.preventDefault();
+				}, false);
+				document.addEventListener("MSGestureHold", function(e) {
+					e.preventDefault();
+				}, false);
+				this.runtime.canvas.addEventListener("gesturehold", function(e) {
+					e.preventDefault();
+				}, false);
+				document.addEventListener("gesturehold", function(e) {
+					e.preventDefault();
+				}, false);
+			}
+		}
+		else if (window.navigator["msPointerEnabled"])
+		{
+			elem.addEventListener("MSPointerDown",
+				function(info) {
+					self.onPointerStart(info);
+				},
+				false
+			);
+			elem.addEventListener("MSPointerMove",
+				function(info) {
+					self.onPointerMove(info);
+				},
+				false
+			);
+			elem2.addEventListener("MSPointerUp",
+				function(info) {
+					self.onPointerEnd(info, false);
+				},
+				false
+			);
+			elem2.addEventListener("MSPointerCancel",
+				function(info) {
+					self.onPointerEnd(info, true);
+				},
+				false
+			);
+			if (this.runtime.canvas)
+			{
+				this.runtime.canvas.addEventListener("MSGestureHold", function(e) {
+					e.preventDefault();
+				}, false);
+				document.addEventListener("MSGestureHold", function(e) {
+					e.preventDefault();
+				}, false);
+			}
+		}
+		else
+		{
+			elem.addEventListener("touchstart",
+				function(info) {
+					self.onTouchStart(info);
+				},
+				false
+			);
+			elem.addEventListener("touchmove",
+				function(info) {
+					self.onTouchMove(info);
+				},
+				false
+			);
+			elem2.addEventListener("touchend",
+				function(info) {
+					self.onTouchEnd(info, false);
+				},
+				false
+			);
+			elem2.addEventListener("touchcancel",
+				function(info) {
+					self.onTouchEnd(info, true);
+				},
+				false
+			);
+		}
+		if (this.isWindows8)
+		{
+			var win8accelerometerFn = function(e) {
+					var reading = e["reading"];
+					self.acc_x = reading["accelerationX"];
+					self.acc_y = reading["accelerationY"];
+					self.acc_z = reading["accelerationZ"];
+				};
+			var win8inclinometerFn = function(e) {
+					var reading = e["reading"];
+					self.orient_alpha = reading["yawDegrees"];
+					self.orient_beta = reading["pitchDegrees"];
+					self.orient_gamma = reading["rollDegrees"];
+				};
+			var accelerometer = Windows["Devices"]["Sensors"]["Accelerometer"]["getDefault"]();
+            if (accelerometer)
+			{
+                accelerometer["reportInterval"] = Math.max(accelerometer["minimumReportInterval"], 16);
+				accelerometer.addEventListener("readingchanged", win8accelerometerFn);
+            }
+			var inclinometer = Windows["Devices"]["Sensors"]["Inclinometer"]["getDefault"]();
+			if (inclinometer)
+			{
+				inclinometer["reportInterval"] = Math.max(inclinometer["minimumReportInterval"], 16);
+				inclinometer.addEventListener("readingchanged", win8inclinometerFn);
+			}
+			document.addEventListener("visibilitychange", function(e) {
+				if (document["hidden"] || document["msHidden"])
+				{
+					if (accelerometer)
+						accelerometer.removeEventListener("readingchanged", win8accelerometerFn);
+					if (inclinometer)
+						inclinometer.removeEventListener("readingchanged", win8inclinometerFn);
+				}
+				else
+				{
+					if (accelerometer)
+						accelerometer.addEventListener("readingchanged", win8accelerometerFn);
+					if (inclinometer)
+						inclinometer.addEventListener("readingchanged", win8inclinometerFn);
+				}
+			}, false);
+		}
+		else
+		{
+			window.addEventListener("deviceorientation", function (eventData) {
+				self.orient_alpha = eventData["alpha"] || 0;
+				self.orient_beta = eventData["beta"] || 0;
+				self.orient_gamma = eventData["gamma"] || 0;
+			}, false);
+			window.addEventListener("devicemotion", function (eventData) {
+				if (eventData["accelerationIncludingGravity"])
+				{
+					self.acc_g_x = eventData["accelerationIncludingGravity"]["x"] || 0;
+					self.acc_g_y = eventData["accelerationIncludingGravity"]["y"] || 0;
+					self.acc_g_z = eventData["accelerationIncludingGravity"]["z"] || 0;
+				}
+				if (eventData["acceleration"])
+				{
+					self.acc_x = eventData["acceleration"]["x"] || 0;
+					self.acc_y = eventData["acceleration"]["y"] || 0;
+					self.acc_z = eventData["acceleration"]["z"] || 0;
+				}
+			}, false);
+		}
+		if (this.useMouseInput && !this.runtime.isDomFree)
+		{
+			document.addEventListener("mousemove",
+			    function(info) {
+					self.onMouseMove(info);
+				});
+			document.addEventListener("mousedown",
+			    function(info) {
+					self.onMouseDown(info);
+				});
+			document.addEventListener("mouseup",
+			    function(info) {
+					self.onMouseUp(info);
+				});
+		}
+		if (!this.runtime.isiOS && this.runtime.isCordova && navigator["accelerometer"] && navigator["accelerometer"]["watchAcceleration"])
+		{
+			navigator["accelerometer"]["watchAcceleration"](PhoneGapGetAcceleration, null, { "frequency": 40 });
+		}
+		this.runtime.tick2Me(this);
+		this.enable = (this.properties[1] == 1);
+		this.lastTouchX = null;
+		this.lastTouchY = null;
+	};
+	instanceProto.getCanvasOffset = function()
+	{
+		if (!this.runtime.isDomFree)
+		{
+			canvasOffset.left = this.runtime.canvas.offsetLeft;
+			canvasOffset.top = this.runtime.canvas.offsetTop;
+		}
+		return canvasOffset;
+	}
+	instanceProto.onPointerMove = function (info)
+	{
+	    if (!this.enable)
+	        return;
+		if (info["pointerType"] === info["MSPOINTER_TYPE_MOUSE"] || info["pointerType"] === "mouse")
+			return;
+		if (info.preventDefault)
+			info.preventDefault();
+		var i = this.findTouch(info["pointerId"]);
+		var nowtime = cr.performance_now();
+		var cnt=this._callbackObjs.length, hooki;
+		if (i >= 0)
+		{
+			var offset = this.getCanvasOffset();
+			var t = this.touches[i];
+			if (nowtime - t.time < 2)
+				return;
+			t.update(nowtime, info.pageX - offset.left, info.pageY - offset.top, info.width || 0, info.height || 0, info.pressure || 0);
+			var touchx = info.pageX - offset.left;
+			var touchy = info.pageY - offset.top;
+            for (hooki=0; hooki<cnt; hooki++)
+			{
+				if (this._callbackObjs[hooki].OnTouchMove)
+                    this._callbackObjs[hooki].OnTouchMove(t["identifier"], touchx, touchy);
+			}
+		}
+	};
+	instanceProto.onPointerStart = function (info)
+	{
+	    if (!this.enable)
+	        return;
+		if (info["pointerType"] === info["MSPOINTER_TYPE_MOUSE"] || info["pointerType"] === "mouse")
+			return;
+		if (info.preventDefault && cr.isCanvasInputEvent(info))
+			info.preventDefault();
+		var offset = this.getCanvasOffset();
+		var touchx = info.pageX - offset.left;
+		var touchy = info.pageY - offset.top;
+		var nowtime = cr.performance_now();
+		this.trigger_index = this.touches.length;
+		this.trigger_id = info["pointerId"];
+		this.touches.push(AllocTouchInfo(touchx, touchy, info["pointerId"], this.trigger_index));
+		this.runtime.isInUserInputEvent = true;
+		this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnNthTouchStart, this);
+		this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchStart, this);
+		this.curTouchX = touchx;
+		this.curTouchY = touchy;
+		this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchObject, this);
+        var hooki, cnt=this._callbackObjs.length;
+        for (hooki=0; hooki<cnt; hooki++)
+		{
+			if (this._callbackObjs[hooki].OnTouchStart)
+                this._callbackObjs[hooki].OnTouchStart(this.trigger_id, this.curTouchX, this.curTouchY);
+	    }
+	    this.runtime.isInUserInputEvent = false;
+	};
+	instanceProto.onPointerEnd = function (info, isCancel)
+	{
+	    if (!this.enable)
+	        return;
+		if (info["pointerType"] === info["MSPOINTER_TYPE_MOUSE"] || info["pointerType"] === "mouse")
+			return;
+		if (info.preventDefault && cr.isCanvasInputEvent(info))
+			info.preventDefault();
+		var i = this.findTouch(info["pointerId"]);
+		this.trigger_index = (i >= 0 ? this.touches[i].startindex : -1);
+		this.trigger_id = (i >= 0 ? this.touches[i]["id"] : -1);
+		this.runtime.isInUserInputEvent = true;
+		this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnNthTouchEnd, this);
+		this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchEnd, this);
+        if (i >= 0)
+        {
+		    this.lastTouchX = this.touches[i].x;
+		    this.lastTouchY = this.touches[i].y;
+		    this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchReleasedObject, this);
+		}
+        var cnt=this._callbackObjs.length, hooki;
+        for (hooki=0; hooki<cnt; hooki++)
+		{
+		    if (this._callbackObjs[hooki].OnTouchEnd)
+                this._callbackObjs[hooki].OnTouchEnd(this.trigger_id);
+		}
+		if (i >= 0)
+		{
+			if (!isCancel)
+				this.touches[i].maybeTriggerTap(this, i);
+			ReleaseTouchInfo(this.touches[i]);
+			this.touches.splice(i, 1);
+		}
+		this.runtime.isInUserInputEvent = false;
+	};
+	instanceProto.onTouchMove = function (info)
+	{
+	    if (!this.enable)
+	        return;
+		if (info.preventDefault)
+			info.preventDefault();
+		var nowtime = cr.performance_now();
+		var i, len, t, u;
+		var cnt=this._callbackObjs.length, hooki;
+		for (i = 0, len = info.changedTouches.length; i < len; i++)
+		{
+			t = info.changedTouches[i];
+			var j = this.findTouch(t["identifier"]);
+			if (j >= 0)
+			{
+				var offset = this.getCanvasOffset();
+				u = this.touches[j];
+				if (nowtime - u.time < 2)
+					continue;
+				var touchWidth = (t.radiusX || t.webkitRadiusX || t.mozRadiusX || t.msRadiusX || 0) * 2;
+				var touchHeight = (t.radiusY || t.webkitRadiusY || t.mozRadiusY || t.msRadiusY || 0) * 2;
+				var touchForce = t.force || t.webkitForce || t.mozForce || t.msForce || 0;
+				u.update(nowtime, t.pageX - offset.left, t.pageY - offset.top, touchWidth, touchHeight, touchForce);
+			    var touchx = t.pageX - offset.left;
+			    var touchy = t.pageY - offset.top;
+                for (hooki=0; hooki<cnt; hooki++)
+			    {
+			    	if (this._callbackObjs[hooki].OnTouchMove)
+                        this._callbackObjs[hooki].OnTouchMove(t["identifier"], touchx, touchy);
+			    }
+			}
+		}
+	};
+	instanceProto.onTouchStart = function (info)
+	{
+	    if (!this.enable)
+	        return;
+		if (info.preventDefault && cr.isCanvasInputEvent(info))
+			info.preventDefault();
+		var offset = this.getCanvasOffset();
+		var nowtime = cr.performance_now();
+		this.runtime.isInUserInputEvent = true;
+		var i, len, t, j;
+        var cnt=this._callbackObjs.length, hooki;
+		for (i = 0, len = info.changedTouches.length; i < len; i++)
+		{
+			t = info.changedTouches[i];
+			j = this.findTouch(t["identifier"]);
+			if (j !== -1)
+				continue;
+			var touchx = t.pageX - offset.left;
+			var touchy = t.pageY - offset.top;
+			this.trigger_index = this.touches.length;
+			this.trigger_id = t["identifier"];
+			this.touches.push(AllocTouchInfo(touchx, touchy, t["identifier"], this.trigger_index));
+			this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnNthTouchStart, this);
+			this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchStart, this);
+			this.curTouchX = touchx;
+			this.curTouchY = touchy;
+			this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchObject, this);
+            for (hooki=0; hooki<cnt; hooki++)
+			{
+				if (this._callbackObjs[hooki].OnTouchStart)
+                    this._callbackObjs[hooki].OnTouchStart(this.trigger_id, this.curTouchX, this.curTouchY);
+			}
+		}
+		this.runtime.isInUserInputEvent = false;
+	};
+	instanceProto.onTouchEnd = function (info, isCancel)
+	{
+	    if (!this.enable)
+	        return;
+		if (info.preventDefault && cr.isCanvasInputEvent(info))
+			info.preventDefault();
+		this.runtime.isInUserInputEvent = true;
+		var i, len, t, j;
+        var cnt=this._callbackObjs.length, hooki;
+		for (i = 0, len = info.changedTouches.length; i < len; i++)
+		{
+			t = info.changedTouches[i];
+			j = this.findTouch(t["identifier"]);
+			if (j >= 0)
+			{
+				this.trigger_index = this.touches[j].startindex;
+				this.trigger_id = this.touches[j]["id"];
+				this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnNthTouchEnd, this);
+				this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchEnd, this);
+		        this.lastTouchX = this.touches[j].x;
+		        this.lastTouchY = this.touches[j].y;
+				this.runtime.trigger(cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchReleasedObject, this);
+                for (hooki=0; hooki<cnt; hooki++)
+			    {
+			        if (this._callbackObjs[hooki].OnTouchEnd)
+                        this._callbackObjs[hooki].OnTouchEnd(this.trigger_id);
+			    }
+				if (!isCancel)
+					this.touches[j].maybeTriggerTap(this, j);
+				ReleaseTouchInfo(this.touches[j]);
+				this.touches.splice(j, 1);
+			}
+		}
+		this.runtime.isInUserInputEvent = false;
+	};
+	instanceProto.getAlpha = function ()
+	{
+		if (this.runtime.isCordova && this.orient_alpha === 0 && pg_accz !== 0)
+			return pg_accz * 90;
+		else
+			return this.orient_alpha;
+	};
+	instanceProto.getBeta = function ()
+	{
+		if (this.runtime.isCordova && this.orient_beta === 0 && pg_accy !== 0)
+			return pg_accy * 90;
+		else
+			return this.orient_beta;
+	};
+	instanceProto.getGamma = function ()
+	{
+		if (this.runtime.isCordova && this.orient_gamma === 0 && pg_accx !== 0)
+			return pg_accx * 90;
+		else
+			return this.orient_gamma;
+	};
+	var noop_func = function(){};
+    instanceProto.updateCursor = function(info)
+    {
+        var offset = this.getCanvasOffset();
+        this.cursor.x = info.pageX - offset.left;
+        this.cursor.y = info.pageY - offset.top;
+    }
+	instanceProto.onMouseDown = function(info)
+	{
+	    if (!this.enable)
+	        return;
+        this.updateCursor(info);
+		this.mouseDown = true;
+		if (info.preventDefault && this.runtime.had_a_click && !this.runtime.isMobile)
+			info.preventDefault();
+        var index = this.findTouch(0);
+        if (index !== -1)
+        {
+            ReleaseTouchInfo(this.touches[index]);
+            cr.arrayRemove( this.touches, index );
+        }
+		var t = { pageX: info.pageX, pageY: info.pageY, "identifier": 0 };
+		var fakeinfo = { changedTouches: [t] };
+		this.onTouchStart(fakeinfo);
+	};
+	instanceProto.onMouseMove = function(info)
+	{
+	    if (!this.enable)
+	        return;
+        this.updateCursor(info);
+		if (!this.mouseDown)
+			return;
+		var t = { pageX: info.pageX, pageY: info.pageY, "identifier": 0 };
+		var fakeinfo = { changedTouches: [t] };
+		this.onTouchMove(fakeinfo);
+	};
+	instanceProto.onMouseUp = function(info)
+	{
+	    if (!this.enable)
+	        return;
+        this.updateCursor(info);
+		this.mouseDown = false;
+		if (info.preventDefault && this.runtime.had_a_click && !this.runtime.isMobile)
+			info.preventDefault();
+		this.runtime.had_a_click = true;
+		var t = { pageX: info.pageX, pageY: info.pageY, "identifier": 0 };
+		var fakeinfo = { changedTouches: [t] };
+		this.onTouchEnd(fakeinfo);
+	};
+	instanceProto.tick2 = function()
+	{
+	    if (!this.enable)
+	        return;
+		var i, len, t;
+		var nowtime = cr.performance_now();
+		for (i = 0, len = this.touches.length; i < len; ++i)
+		{
+			t = this.touches[i];
+			if (t.time <= nowtime - 50)
+				t.lasttime = nowtime;
+			t.maybeTriggerHold(this, i);
+		}
+		this.lastTouchX = null;
+		this.lastTouchY = null;
+	};
+	function Cnds() {};
+	Cnds.prototype.OnTouchStart = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.OnTouchEnd = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.IsInTouch = function ()
+	{
+		return this.IsInTouch();
+	};
+	Cnds.prototype.OnTouchObject = function (type)
+	{
+		if (!type)
+			return false;
+		return this.runtime.testAndSelectCanvasPointOverlap(type, this.curTouchX, this.curTouchY, false);
+	};
+	var touching = [];
+	Cnds.prototype.IsTouchingObject = function (type)
+	{
+        if (!this.IsInTouch())
+            return;
+		if (!type)
+			return false;
+		var sol = type.getCurrentSol();
+		var instances = sol.getObjects();
+		var px, py;
+		var i, leni, j, lenj;
+		for (i = 0, leni = instances.length; i < leni; i++)
+		{
+			var inst = instances[i];
+			inst.update_bbox();
+			for (j = 0, lenj = this.touches.length; j < lenj; j++)
+			{
+				var touch = this.touches[j];
+				px = inst.layer.canvasToLayer(touch.x, touch.y, true);
+				py = inst.layer.canvasToLayer(touch.x, touch.y, false);
+				if (inst.contains_pt(px, py))
+				{
+					touching.push(inst);
+					break;
+				}
+			}
+		}
+		if (touching.length)
+		{
+			sol.select_all = false;
+			cr.shallowAssignArray(sol.instances, touching);
+			type.applySolToContainer();
+			cr.clearArray(touching);
+			return true;
+		}
+		else
+			return false;
+	};
+	Cnds.prototype.CompareTouchSpeed = function (index, cmp, s)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+			return false;
+		var t = this.touches[index];
+		var dist = cr.distanceTo(t.x, t.y, t.lastx, t.lasty);
+		var timediff = (t.time - t.lasttime) / 1000;
+		var speed = 0;
+		if (timediff > 0)
+			speed = dist / timediff;
+		return cr.do_cmp(speed, cmp, s);
+	};
+	Cnds.prototype.OrientationSupported = function ()
+	{
+		return typeof window["DeviceOrientationEvent"] !== "undefined";
+	};
+	Cnds.prototype.MotionSupported = function ()
+	{
+		return typeof window["DeviceMotionEvent"] !== "undefined";
+	};
+	Cnds.prototype.CompareOrientation = function (orientation_, cmp_, angle_)
+	{
+		var v = 0;
+		if (orientation_ === 0)
+			v = this.getAlpha();
+		else if (orientation_ === 1)
+			v = this.getBeta();
+		else
+			v = this.getGamma();
+		return cr.do_cmp(v, cmp_, angle_);
+	};
+	Cnds.prototype.CompareAcceleration = function (acceleration_, cmp_, angle_)
+	{
+		var v = 0;
+		if (acceleration_ === 0)
+			v = this.acc_g_x;
+		else if (acceleration_ === 1)
+			v = this.acc_g_y;
+		else if (acceleration_ === 2)
+			v = this.acc_g_z;
+		else if (acceleration_ === 3)
+			v = this.acc_x;
+		else if (acceleration_ === 4)
+			v = this.acc_y;
+		else if (acceleration_ === 5)
+			v = this.acc_z;
+		return cr.do_cmp(v, cmp_, angle_);
+	};
+	Cnds.prototype.OnNthTouchStart = function (touch_)
+	{
+		touch_ = Math.floor(touch_);
+		return touch_ === this.trigger_index;
+	};
+	Cnds.prototype.OnNthTouchEnd = function (touch_)
+	{
+		touch_ = Math.floor(touch_);
+		return touch_ === this.trigger_index;
+	};
+	Cnds.prototype.HasNthTouch = function (touch_)
+	{
+		touch_ = Math.floor(touch_);
+		return this.touches.length >= touch_ + 1;
+	};
+	Cnds.prototype.OnHoldGesture = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.OnTapGesture = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.OnDoubleTapGesture = function ()
+	{
+		return true;
+	};
+	Cnds.prototype.OnHoldGestureObject = function (type)
+	{
+		if (!type)
+			return false;
+		return this.runtime.testAndSelectCanvasPointOverlap(type, this.curTouchX, this.curTouchY, false);
+	};
+	Cnds.prototype.OnTapGestureObject = function (type)
+	{
+		if (!type)
+			return false;
+		return this.runtime.testAndSelectCanvasPointOverlap(type, this.curTouchX, this.curTouchY, false);
+	};
+	Cnds.prototype.OnDoubleTapGestureObject = function (type)
+	{
+		if (!type)
+			return false;
+		return this.runtime.testAndSelectCanvasPointOverlap(type, this.curTouchX, this.curTouchY, false);
+	};
+	Cnds.prototype.OnTouchReleasedObject = function (type)
+	{
+		if (!type)
+			return false;
+		return this.runtime.testAndSelectCanvasPointOverlap(type, this.lastTouchX, this.lastTouchY, false);
+	};
+	pluginProto.cnds = new Cnds();
+    function Acts() {};
+    pluginProto.acts = new Acts();
+    Acts.prototype.SetEnable = function(en)
+    {
+        this.enable = (en==1);
+    };
+	function Exps() {};
+	Exps.prototype.TouchCount = function (ret)
+	{
+		ret.set_int(this.touches.length);
+	};
+	Exps.prototype.X = function (ret, layerparam)
+	{
+		var index = this.getTouchIndex;
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var layer, oldScale, oldZoomRate, oldParallaxX, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxX = layer.parallaxX;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxX = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, true));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxX = oldParallaxX;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, true));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.XAt = function (ret, index, layerparam)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var layer, oldScale, oldZoomRate, oldParallaxX, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxX = layer.parallaxX;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxX = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, true));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxX = oldParallaxX;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, true));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.XForID = function (ret, id, layerparam)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		var layer, oldScale, oldZoomRate, oldParallaxX, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxX = layer.parallaxX;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxX = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(touch.x, touch.y, true));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxX = oldParallaxX;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(touch.x, touch.y, true));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.Y = function (ret, layerparam)
+	{
+		var index = this.getTouchIndex;
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var layer, oldScale, oldZoomRate, oldParallaxY, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxY = layer.parallaxY;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxY = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, false));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxY = oldParallaxY;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, false));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.YAt = function (ret, index, layerparam)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var layer, oldScale, oldZoomRate, oldParallaxY, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxY = layer.parallaxY;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxY = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, false));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxY = oldParallaxY;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(this.touches[index].x, this.touches[index].y, false));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.YForID = function (ret, id, layerparam)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		var layer, oldScale, oldZoomRate, oldParallaxY, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxY = layer.parallaxY;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxY = 1.0;
+			layer.angle = 0;
+			ret.set_float(layer.canvasToLayer(touch.x, touch.y, false));
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxY = oldParallaxY;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				ret.set_float(layer.canvasToLayer(touch.x, touch.y, false));
+			else
+				ret.set_float(0);
+		}
+	};
+	Exps.prototype.AbsoluteX = function (ret)
+	{
+		if (this.touches.length)
+			ret.set_float(this.touches[0].x);
+		else
+			ret.set_float(0);
+	};
+	Exps.prototype.AbsoluteXAt = function (ret, index)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		ret.set_float(this.touches[index].x);
+	};
+	Exps.prototype.AbsoluteXForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(touch.x);
+	};
+	Exps.prototype.AbsoluteY = function (ret)
+	{
+		if (this.touches.length)
+			ret.set_float(this.touches[0].y);
+		else
+			ret.set_float(0);
+	};
+	Exps.prototype.AbsoluteYAt = function (ret, index)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		ret.set_float(this.touches[index].y);
+	};
+	Exps.prototype.AbsoluteYForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(touch.y);
+	};
+	Exps.prototype.SpeedAt = function (ret, index)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var t = this.touches[index];
+		var dist = cr.distanceTo(t.x, t.y, t.lastx, t.lasty);
+		var timediff = (t.time - t.lasttime) / 1000;
+		if (timediff === 0)
+			ret.set_float(0);
+		else
+			ret.set_float(dist / timediff);
+	};
+	Exps.prototype.SpeedForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		var dist = cr.distanceTo(touch.x, touch.y, touch.lastx, touch.lasty);
+		var timediff = (touch.time - touch.lasttime) / 1000;
+		if (timediff === 0)
+			ret.set_float(0);
+		else
+			ret.set_float(dist / timediff);
+	};
+	Exps.prototype.AngleAt = function (ret, index)
+	{
+		index = Math.floor(index);
+		if (index < 0 || index >= this.touches.length)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var t = this.touches[index];
+		ret.set_float(cr.to_degrees(cr.angleTo(t.lastx, t.lasty, t.x, t.y)));
+	};
+	Exps.prototype.AngleForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(cr.to_degrees(cr.angleTo(touch.lastx, touch.lasty, touch.x, touch.y)));
+	};
+	Exps.prototype.Alpha = function (ret)
+	{
+		ret.set_float(this.getAlpha());
+	};
+	Exps.prototype.Beta = function (ret)
+	{
+		ret.set_float(this.getBeta());
+	};
+	Exps.prototype.Gamma = function (ret)
+	{
+		ret.set_float(this.getGamma());
+	};
+	Exps.prototype.AccelerationXWithG = function (ret)
+	{
+		ret.set_float(this.acc_g_x);
+	};
+	Exps.prototype.AccelerationYWithG = function (ret)
+	{
+		ret.set_float(this.acc_g_y);
+	};
+	Exps.prototype.AccelerationZWithG = function (ret)
+	{
+		ret.set_float(this.acc_g_z);
+	};
+	Exps.prototype.AccelerationX = function (ret)
+	{
+		ret.set_float(this.acc_x);
+	};
+	Exps.prototype.AccelerationY = function (ret)
+	{
+		ret.set_float(this.acc_y);
+	};
+	Exps.prototype.AccelerationZ = function (ret)
+	{
+		ret.set_float(this.acc_z);
+	};
+	Exps.prototype.TouchIndex = function (ret)
+	{
+		ret.set_int(this.trigger_index);
+	};
+	Exps.prototype.TouchID = function (ret)
+	{
+		ret.set_float(this.trigger_id);
+	};
+	Exps.prototype.WidthForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(touch.width);
+	};
+	Exps.prototype.HeightForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(touch.height);
+	};
+	Exps.prototype.PressureForID = function (ret, id)
+	{
+		var index = this.findTouch(id);
+		if (index < 0)
+		{
+			ret.set_float(0);
+			return;
+		}
+		var touch = this.touches[index];
+		ret.set_float(touch.pressure);
+	};
+	pluginProto.exps = new Exps();
+    instanceProto.HookMe = function (obj)
+    {
+        this._callbackObjs.push(obj);
+    };
+    instanceProto.UnHookMe = function (obj)
+    {
+        cr.arrayFindRemove(this._callbackObjs, obj);
+    };
+    instanceProto.IsInTouch = function ()
+	{
+        return (this.touches.length > 0);
+    };
+    var exps = cr.plugins_.rex_TouchWrap.prototype.exps;
+    instanceProto.TouchCount = function()
+    {
+        exps.TouchCount.call(this, this.fake_ret);
+        return this.fake_ret.value
+    };
+    instanceProto.X = function(layerparam)
+    {
+        exps.X.call(this, this.fake_ret, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.XAt = function(index, layerparam)
+    {
+        exps.XAt.call(this, this.fake_ret, index, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.XForID = function(id, layerparam)
+    {
+        exps.XForID.call(this, this.fake_ret, id, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.Y = function(layerparam)
+    {
+        exps.Y.call(this, this.fake_ret, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.YAt = function(index, layerparam)
+    {
+        exps.YAt.call(this, this.fake_ret, index, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.YForID = function(id, layerparam)
+    {
+        exps.YForID.call(this, this.fake_ret, id, layerparam);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteX = function()
+    {
+        exps.AbsoluteX.call(this, this.fake_ret);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteXAt = function(index)
+    {
+        exps.AbsoluteXAt.call(this, this.fake_ret, index);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteXForID = function(id)
+    {
+        exps.AbsoluteXForID.call(this, this.fake_ret, id);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteY = function()
+    {
+        exps.AbsoluteY.call(this, this.fake_ret);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteYAt = function(index)
+    {
+        exps.AbsoluteYAt.call(this, this.fake_ret, index);
+        return this.fake_ret.value
+    };
+    instanceProto.AbsoluteYForID = function(id)
+    {
+        exps.AbsoluteYForID.call(this, this.fake_ret, id);
+        return this.fake_ret.value
+    };
+	instanceProto.CursorX = function (layerparam)
+	{
+        if (this.cursor.x == null)
+            return null;
+        var x;
+		var layer, oldScale, oldZoomRate, oldParallaxX, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxX = layer.parallaxX;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxX = 1.0;
+			layer.angle = 0;
+			x = layer.canvasToLayer(this.cursor.x, this.cursor.y, true);
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxX = oldParallaxX;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				x = layer.canvasToLayer(this.cursor.x, this.cursor.y, true);
+			else
+				x = 0;
+		}
+        return x;
+	};
+	instanceProto.CursorY = function (layerparam)
+	{
+        if (this.cursor.y == null)
+            return null;
+        var y;
+		var layer, oldScale, oldZoomRate, oldParallaxX, oldAngle;
+		if (cr.is_undefined(layerparam))
+		{
+			layer = this.runtime.getLayerByNumber(0);
+			oldScale = layer.scale;
+			oldZoomRate = layer.zoomRate;
+			oldParallaxX = layer.parallaxX;
+			oldAngle = layer.angle;
+			layer.scale = 1;
+			layer.zoomRate = 1.0;
+			layer.parallaxX = 1.0;
+			layer.angle = 0;
+			y = layer.canvasToLayer(this.cursor.x, this.cursor.y, false);
+			layer.scale = oldScale;
+			layer.zoomRate = oldZoomRate;
+			layer.parallaxX = oldParallaxX;
+			layer.angle = oldAngle;
+		}
+		else
+		{
+			if (cr.is_number(layerparam))
+				layer = this.runtime.getLayerByNumber(layerparam);
+			else
+				layer = this.runtime.getLayerByName(layerparam);
+			if (layer)
+				y = layer.canvasToLayer(this.cursor.x, this.cursor.y, false);
+			else
+				y = 0;
+		}
+        return y;
+	};
+    instanceProto.CursorAbsoluteX = function ()
+    {
+        return this.cursor.x;
+    };
+    instanceProto.CursorAbsoluteY = function ()
+    {
+        return this.cursor.y;
+    };
 }());
 ;
 ;
@@ -50010,39 +53668,45 @@ cr.behaviors.solid = function(runtime)
 }());
 cr.getObjectRefTable = function () { return [
 	cr.plugins_.AJAX,
-	cr.plugins_.Button,
 	cr.plugins_.Arr,
 	cr.plugins_.Audio,
-	cr.plugins_.c2canvas,
 	cr.plugins_.Browser,
-	cr.plugins_.Dictionary,
+	cr.plugins_.c2canvas,
+	cr.plugins_.Button,
 	cr.plugins_.Keyboard,
+	cr.plugins_.Dictionary,
 	cr.plugins_.Function,
-	cr.plugins_.Particles,
-	cr.plugins_.LocalStorage,
 	cr.plugins_.Mouse,
+	cr.plugins_.LocalStorage,
+	cr.plugins_.Particles,
+	cr.plugins_.Rex_ArrowKey,
+	cr.plugins_.Rex_SLGSquareTx,
+	cr.plugins_.Rex_SLGBoard,
 	cr.plugins_.Rex_EventBalancer,
 	cr.plugins_.Rex_CSV,
-	cr.plugins_.Rex_SLGBoard,
 	cr.plugins_.Rex_Comment,
-	cr.plugins_.Rex_SLGSquareTx,
-	cr.plugins_.Rex_Hash,
-	cr.plugins_.Rex_gInstGroup,
+	cr.plugins_.Rex_FirebaseAPIV3,
+	cr.plugins_.Rex_Firebase_Leaderboard,
+	cr.plugins_.Rex_Firebase_Authentication,
 	cr.plugins_.Rex_Graph,
+	cr.plugins_.Rex_gInstGroup,
 	cr.plugins_.Rex_Layouter,
+	cr.plugins_.Rex_Hash,
 	cr.plugins_.Rex_LoopIterator,
-	cr.plugins_.Rex_Nickname,
 	cr.plugins_.Rex_MazeGen,
-	cr.plugins_.Rex_PatternGen,
+	cr.plugins_.Rex_Nickname,
 	cr.plugins_.Rex_SequenceMatcher,
-	cr.plugins_.Rex_SysExt,
+	cr.plugins_.Rex_SimulateInput,
 	cr.plugins_.rex_TagText,
+	cr.plugins_.Rex_PatternGen,
+	cr.plugins_.Rex_SysExt,
+	cr.plugins_.rex_TouchWrap,
 	cr.plugins_.Rex_TweenTasks,
-	cr.plugins_.shadowlight,
 	cr.plugins_.UserMedia,
 	cr.plugins_.Sprite,
-	cr.plugins_.TiledBg,
+	cr.plugins_.shadowlight,
 	cr.plugins_.Tilemap,
+	cr.plugins_.TiledBg,
 	cr.plugins_.HTML_iFrame,
 	cr.behaviors.Rex_pinOffsetXY,
 	cr.behaviors.Timer,
@@ -50119,6 +53783,7 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.Function.prototype.exps.Param,
 	cr.plugins_.Sprite.prototype.acts.SetInstanceVar,
 	cr.plugins_.Sprite.prototype.acts.SetPos,
+	cr.plugins_.Sprite.prototype.acts.SetScale,
 	cr.behaviors.Rex_bHash.prototype.acts.SetValueByKeyString,
 	cr.plugins_.Rex_gInstGroup.prototype.acts.AddInsts,
 	cr.system_object.prototype.cnds.Compare,
@@ -50138,6 +53803,7 @@ cr.getObjectRefTable = function () { return [
 	cr.system_object.prototype.cnds.PickRandom,
 	cr.plugins_.Function.prototype.acts.SetReturnValue,
 	cr.plugins_.Mouse.prototype.cnds.OnObjectClicked,
+	cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchReleasedObject,
 	cr.plugins_.Sprite.prototype.acts.Destroy,
 	cr.behaviors.Timer.prototype.cnds.OnTimer,
 	cr.system_object.prototype.acts.AddVar,
@@ -50174,10 +53840,14 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.c2canvas.prototype.acts.fillPath,
 	cr.plugins_.Mouse.prototype.cnds.OnRelease,
 	cr.behaviors.Timer.prototype.acts.StopTimer,
+	cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchEnd,
 	cr.plugins_.Mouse.prototype.cnds.OnClick,
+	cr.behaviors.Timer.prototype.acts.StartTimer,
 	cr.plugins_.Mouse.prototype.exps.X,
 	cr.plugins_.Mouse.prototype.exps.Y,
-	cr.behaviors.Timer.prototype.acts.StartTimer,
+	cr.plugins_.rex_TouchWrap.prototype.cnds.OnTouchStart,
+	cr.plugins_.rex_TouchWrap.prototype.exps.X,
+	cr.plugins_.rex_TouchWrap.prototype.exps.Y,
 	cr.plugins_.Sprite.prototype.cnds.IsOutsideLayout,
 	cr.plugins_.Sprite.prototype.acts.SetCollisions,
 	cr.plugins_.Sprite.prototype.acts.SetY,
@@ -50280,6 +53950,7 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.rex_TagText.prototype.cnds.PickByUID,
 	cr.plugins_.Sprite.prototype.exps.BBoxRight,
 	cr.plugins_.Mouse.prototype.cnds.IsOverObject,
+	cr.plugins_.rex_TouchWrap.prototype.cnds.IsTouchingObject,
 	cr.plugins_.Rex_gInstGroup.prototype.acts.Clean,
 	cr.plugins_.Rex_TweenTasks.prototype.acts.NewInversedTweenTask,
 	cr.plugins_.Rex_TweenTasks.prototype.acts.NewSequenceTask,
@@ -50312,6 +53983,7 @@ cr.getObjectRefTable = function () { return [
 	cr.behaviors.Rex_bHash.prototype.cnds.ForEachItem,
 	cr.behaviors.Rex_bHash.prototype.exps.CurValue,
 	cr.behaviors.Rex_Rotate.prototype.acts.SetSpeed,
+	cr.plugins_.rex_TouchWrap.prototype.cnds.IsInTouch,
 	cr.plugins_.Sprite.prototype.acts.SetTowardPosition,
 	cr.plugins_.Sprite.prototype.cnds.IsCollisionEnabled,
 	cr.system_object.prototype.cnds.TriggerOnce,
@@ -50323,9 +53995,10 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.Arr.prototype.acts.Pop,
 	cr.plugins_.Arr.prototype.cnds.IsEmpty,
 	cr.plugins_.Sprite.prototype.acts.SetPosToObject,
+	cr.plugins_.Arr.prototype.exps.Front,
+	cr.plugins_.Browser.prototype.acts.ConsoleLog,
 	cr.behaviors.Rex_bFunction2.prototype.acts.CallExpression,
 	cr.behaviors.Rex_bFunction2.prototype.exps.Call,
-	cr.plugins_.Browser.prototype.acts.ConsoleLog,
 	cr.behaviors.Rex_bFunction2.prototype.cnds.OnFunction,
 	cr.behaviors.Rex_bFunction2.prototype.exps.Param,
 	cr.behaviors.Fade.prototype.acts.SetFadeOutTime,
@@ -50340,6 +54013,7 @@ cr.getObjectRefTable = function () { return [
 	cr.behaviors.Rex_CameraFollower.prototype.acts.SetFollowingEnable,
 	cr.plugins_.Sprite.prototype.acts.SetX,
 	cr.plugins_.Sprite.prototype.acts.SetWidth,
+	cr.plugins_.Sprite.prototype.acts.SetEffectEnabled,
 	cr.plugins_.Sprite.prototype.acts.SetHeight,
 	cr.plugins_.Keyboard.prototype.cnds.OnKey,
 	cr.behaviors.Platform.prototype.cnds.IsOnFloor,
@@ -50417,10 +54091,13 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.TiledBg.prototype.acts.Destroy,
 	cr.plugins_.HTML_iFrame.prototype.cnds.CompareInstanceVar,
 	cr.plugins_.HTML_iFrame.prototype.acts.GetElement,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.acts.SetInstanceVar,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.acts.UpdateTopRanks,
 	cr.plugins_.Rex_CSV.prototype.cnds.ForEachRow,
 	cr.plugins_.Rex_CSV.prototype.cnds.ForEachCol,
 	cr.plugins_.Rex_CSV.prototype.exps.CurValue,
 	cr.plugins_.Rex_CSV.prototype.acts.Destroy,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.acts.PostScore,
 	cr.plugins_.Rex_CSV.prototype.cnds.HasCol,
 	cr.plugins_.Rex_CSV.prototype.acts.AppendCol,
 	cr.plugins_.Rex_CSV.prototype.acts.AppendRow,
@@ -50433,6 +54110,14 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.HTML_iFrame.prototype.acts.LoadHTML,
 	cr.plugins_.HTML_iFrame.prototype.acts.ImpJSfile,
 	cr.plugins_.HTML_iFrame.prototype.cnds.OnLoad,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.OnUpdate,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.CompareInstanceVar,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.cnds.ForEachRank,
+	cr.system_object.prototype.exps.str,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.exps.CurPlayerRank,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.exps.CurPlayerName,
+	cr.plugins_.Rex_Firebase_Leaderboard.prototype.exps.CurPlayerScore,
+	cr.plugins_.HTML_iFrame.prototype.acts.AppendHTML,
 	cr.plugins_.Dictionary.prototype.cnds.HasKey,
 	cr.plugins_.Dictionary.prototype.acts.DeleteKey,
 	cr.plugins_.HTML_iFrame.prototype.acts.SetHTML,
@@ -50447,16 +54132,34 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.HTML_iFrame.prototype.acts.Actualizar,
 	cr.plugins_.Rex_TweenTasks.prototype.cnds.OnTaskDone,
 	cr.plugins_.Audio.prototype.exps.AnalyserRMSLevel,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDetectingStart,
 	cr.plugins_.Keyboard.prototype.cnds.OnKeyReleased,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.OnDetectingEnd,
 	cr.plugins_.UserMedia.prototype.cnds.OnMediaSources,
+	cr.plugins_.UserMedia.prototype.exps.AudioSourceLabelAt,
 	cr.plugins_.UserMedia.prototype.exps.AudioSourceCount,
 	cr.plugins_.UserMedia.prototype.acts.RequestMic,
-	cr.plugins_.UserMedia.prototype.exps.AudioSourceLabelAt,
 	cr.plugins_.Audio.prototype.acts.RemoveEffects,
 	cr.plugins_.Audio.prototype.acts.AddAnalyserEffect,
 	cr.plugins_.Audio.prototype.acts.AddMuteEffect,
 	cr.system_object.prototype.acts.SetGroupActive,
 	cr.plugins_.UserMedia.prototype.acts.GetMediaSources,
+	cr.plugins_.UserMedia.prototype.cnds.OnDeclined,
+	cr.plugins_.UserMedia.prototype.cnds.OnApproved,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.IsUPDown,
+	cr.plugins_.Rex_SimulateInput.prototype.acts.SimulateKeyboard,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.IsDOWNDown,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.IsLEFTDown,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.IsRIGHTDown,
+	cr.plugins_.Rex_ArrowKey.prototype.exps.OX,
+	cr.plugins_.Rex_ArrowKey.prototype.exps.OY,
+	cr.plugins_.Rex_ArrowKey.prototype.cnds.IsInDetecting,
+	cr.plugins_.Rex_ArrowKey.prototype.exps.CurrX,
+	cr.plugins_.Rex_ArrowKey.prototype.exps.CurrY,
+	cr.system_object.prototype.exps.distance,
+	cr.system_object.prototype.exps.min,
+	cr.system_object.prototype.exps.cos,
+	cr.system_object.prototype.exps.sin,
 	cr.plugins_.Rex_CSV.prototype.acts.Clear,
 	cr.plugins_.Dictionary.prototype.acts.Clear,
 	cr.plugins_.Rex_Graph.prototype.acts.RemoveAll,
@@ -50468,6 +54171,7 @@ cr.getObjectRefTable = function () { return [
 	cr.system_object.prototype.exps.windowheight,
 	cr.plugins_.Browser.prototype.exps.QueryParam,
 	cr.plugins_.LocalStorage.prototype.acts.GetItem,
+	cr.system_object.prototype.cnds.IsMobile,
 	cr.plugins_.AJAX.prototype.cnds.OnAnyComplete,
 	cr.plugins_.AJAX.prototype.exps.Tag,
 	cr.plugins_.rex_TagText.prototype.acts.ZMoveToObject,
@@ -50534,7 +54238,6 @@ cr.getObjectRefTable = function () { return [
 	cr.system_object.prototype.exps.left,
 	cr.plugins_.LocalStorage.prototype.exps.Key,
 	cr.plugins_.LocalStorage.prototype.exps.ItemValue,
-	cr.plugins_.Sprite.prototype.acts.SetScale,
 	cr.plugins_.rex_TagText.prototype.acts.SetPos,
 	cr.plugins_.Particles.prototype.acts.SetSpraying,
 	cr.system_object.prototype.acts.RestartLayout,
@@ -50543,7 +54246,6 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.Particles.prototype.exps.ParticleCount,
 	cr.system_object.prototype.acts.SetTimescale,
 	cr.system_object.prototype.acts.SetObjectTimescale,
-	cr.plugins_.HTML_iFrame.prototype.acts.AppendHTML,
 	cr.plugins_.HTML_iFrame.prototype.acts.ExecJS,
 	cr.plugins_.TiledBg.prototype.cnds.PickTopBottom,
 	cr.system_object.prototype.acts.ResetGlobals,
@@ -50562,5 +54264,6 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.HTML_iFrame.prototype.exps.UID,
 	cr.plugins_.HTML_iFrame.prototype.cnds.PickByUID,
 	cr.plugins_.LocalStorage.prototype.acts.ClearStorage,
+	cr.plugins_.Rex_CSV.prototype.exps.Count,
 	cr.plugins_.Dictionary.prototype.cnds.CompareValue
 ];};

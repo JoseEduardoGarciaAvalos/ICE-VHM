@@ -9,7 +9,6 @@
 }
 .videoGrande{
     width: 100%;
-    height: 90%;
     margin: 0%;
 }
 .videoTitulo{
@@ -23,4 +22,39 @@
 .videoTitulo img{
     position: relative;
     top: 18px;
+}
+
+@media (min-width: 255px) and (max-width: 300px){
+    .videoTitulo div{
+        font-size: 11px;
+    }
+}
+
+@media (min-width: 301px) and (max-width: 350px){
+    .videoTitulo div{
+        top: -15px;
+    }
+}
+
+@media (min-width: 351px) and (max-width: 500px){
+    .videoTitulo div{
+         top: -18px;
+    }
+}
+
+@media (max-width: 500px){
+    .videoTitulo img{
+        visibility: hidden;
+    }
+    .videoTitulo div{
+        position: relative;
+    }
+}
+
+
+
+@media (min-width: 501px) {
+    .videoGrande {
+        height: 90%;    
+    }
 }

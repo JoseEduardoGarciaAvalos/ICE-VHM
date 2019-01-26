@@ -25233,8 +25233,8 @@ window["chartjs"] = function(context){
 cr.getObjectRefTable = function () { return [
 	cr.plugins_.AJAX,
 	cr.plugins_.Arr,
-	cr.plugins_.c2canvas,
 	cr.plugins_.Browser,
+	cr.plugins_.c2canvas,
 	cr.plugins_.Dictionary,
 	cr.plugins_.Function,
 	cr.plugins_.Mouse,
